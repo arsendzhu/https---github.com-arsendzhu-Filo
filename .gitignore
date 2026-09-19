@@ -1,0 +1,11 @@
+config.json
+.env
+.env.*
+!.env.example
+app/.godot/
+helper/build/
+*.log
+.DS_Store
+app/native/
+tts/venv/
+tts/models/

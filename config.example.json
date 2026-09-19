@@ -1,0 +1,71 @@
+{
+  "anthropic_api_key": "",
+  "model": "claude-opus-5",
+  "effort": "low",
+  "hotkey": {
+    "key": "space",
+    "modifiers": [
+      "option"
+    ]
+  },
+  "default_profile": "sekiro",
+  "web_search": {
+    "enabled": true,
+    "max_uses": 2,
+    "confidence_threshold": 0.45,
+    "provider": "auto",
+    "wikipedia": {
+      "enabled": true,
+      "language": "en",
+      "max_pages": 2,
+      "user_agent": "Filo/0.1 (game overlay companion; local use)"
+    }
+  },
+  "tts": {
+    "enabled": true,
+    "provider": "auto",
+    "voice": "Ava, Zoe, Samantha",
+    "rate": 1.0,
+    "volume": 70,
+    "kokoro": {
+      "voice": "af_heart",
+      "speed": 1.05
+    }
+  },
+  "overlay": {
+    "corner": "bottom_right",
+    "margin": 24,
+    "width": 620,
+    "height": 420
+  },
+  "mascot": {
+    "internal_resolution": 96,
+    "size": 200,
+    "dither": 0.09,
+    "vertex_jitter": 0.0
+  },
+  "behavior": {
+    "idle_timeout": 0.0,
+    "answer_linger": 0.0,
+    "greet_on_launch": true,
+    "reprompt": true,
+    "followup_listen_seconds": 30,
+    "conversation_turns": 4
+  },
+  "screen_reading": {
+    "enabled": false
+  },
+  "wake_word": {
+    "enabled": true,
+    "phrase": "hey filo",
+    "bye_phrase": "bye filo",
+    "silence_ms": 1500
+  },
+  "llm": {
+    "provider": "auto"
+  },
+  "nim": {
+    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "reasoning": false
+  }
+}

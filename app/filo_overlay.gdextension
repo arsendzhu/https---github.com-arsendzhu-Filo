@@ -1,0 +1,9 @@
+[configuration]
+
+entry_symbol = "filo_overlay_init"
+compatibility_minimum = "4.2"
+
+[libraries]
+
+macos.debug = "res://native/libfilo_overlay.dylib"
+macos.release = "res://native/libfilo_overlay.dylib"

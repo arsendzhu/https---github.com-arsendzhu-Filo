@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Offline stand-ins for the network services Filo talks to, on one port:
+  POST /v1/messages              Claude Messages API
+  POST /v1/chat/completions      NVIDIA NIM (OpenAI-compatible)
+  GET  /w/api.php                Wikipedia search
+  GET  /api/rest_v1/page/summary/<title>   Wikipedia page summary
+MOCK_MODE=ok|web|refusal|overloaded|badkey (default ok)."""
+import json
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, unquote, urlparse
+
+MODE = os.environ.get("MOCK_MODE", "ok")
+PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 8787
+
+WIKI_PAGES = {
+    "Ganon": "Ganon, also known as Ganondorf, is a fictional character and the main antagonist of Nintendo's The Legend of Zelda series. He is the leader of the Gerudo and seeks the Triforce.",
+    "The Legend of Zelda": "The Legend of Zelda is a video game franchise created by Shigeru Miyamoto and Takashi Tezuka. It follows Link, who rescues Princess Zelda and the kingdom of Hyrule from Ganon.",
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        ua = self.headers.get("User-Agent", "")
+        if url.path == "/w/api.php":
+            q = parse_qs(url.query)
+            term = q.get("srsearch", [""])[0]
+            sys.stderr.write("mock_wiki: search %r ua=%r\n" % (term, ua))
+            hits = []
+            low = term.lower()
+            if "ganon" in low or "zelda" in low:
+                hits = [{"title": "Ganon"}, {"title": "The Legend of Zelda"}, {"title": "Ganon (disambiguation)"}]
+            return self.reply(200, {"query": {"search": hits}})
+        if url.path.startswith("/api/rest_v1/page/summary/"):
+            title = unquote(url.path.split("/summary/", 1)[1]).replace("_", " ")
+            sys.stderr.write("mock_wiki: summary %r\n" % title)
+            if "disambiguation" in title:
+                return self.reply(200, {"type": "disambiguation", "title": title, "extract": "may refer to..."})
+            if title not in WIKI_PAGES:
+                return self.reply(404, {"type": "https://mediawiki.org/wiki/HyperSwitch/errors/not_found", "title": "Not found."})
+            return self.reply(200, {"type": "standard", "title": title, "extract": WIKI_PAGES[title],
+                                    "description": "mock", "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/" + title.replace(" ", "_")}}})
+        return self.reply(404, {"error": "no such route"})
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/v1/chat/completions":
+            return self.nim(body)
+        if self.path != "/v1/messages":
+            return self.reply(404, {"type": "error", "error": {"type": "not_found_error", "message": "no such route"}})
+        tools = body.get("tools", [])
+        sys.stderr.write("mock_api: model=%s effort=%s fallbacks=%s beta=%s tools=%s\n" % (
+            body.get("model"), body.get("output_config", {}).get("effort"), body.get("fallbacks"),
+            self.headers.get("anthropic-beta"), [t.get("type") for t in tools]))
+        if self.headers.get("x-api-key") != "test-key" or MODE == "badkey":
+            return self.reply(401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+        if MODE == "overloaded":
+            return self.reply(529, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+        user = body["messages"][0]["content"]
+        question = user.split("Question:")[-1].strip() if "Question:" in user else user
+        if MODE == "refusal":
+            return self.reply(200, {"id": "msg_mock", "type": "message", "role": "assistant", "model": body.get("model"),
+                                    "stop_reason": "refusal", "stop_details": {"type": "refusal", "category": None},
+                                    "content": [], "usage": {"input_tokens": 1, "output_tokens": 0}})
+        content = []
+        if tools or MODE == "web":
+            content.append({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": question}})
+            content.append({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                {"type": "web_search_result", "url": "https://example.com/guide", "title": "Example Guide", "encrypted_content": "x", "page_age": None}]})
+            content.append({"type": "text", "text": "Mock web-backed answer for: %s. " % question,
+                            "citations": [{"type": "web_search_result_location", "url": "https://example.com/guide",
+                                           "title": "Example Guide", "encrypted_index": "x", "cited_text": "..."}]})
+            content.append({"type": "text", "text": "Firecrackers stagger it.\nSOURCES: none"})
+        else:
+            content.append({"type": "text", "text": "Mock answer for: %s Use the Shinobi Firecracker to stagger it, then hit it from behind.\nSOURCES: 1" % question})
+        self.reply(200, {"id": "msg_mock", "type": "message", "role": "assistant", "model": body.get("model"),
+                         "stop_reason": "end_turn", "stop_details": None, "content": content,
+                         "usage": {"input_tokens": 10, "output_tokens": 20}})
+
+    def nim(self, body):
+        auth = self.headers.get("Authorization", "")
+        sys.stderr.write("mock_nim: model=%s thinking=%s auth=%s\n" % (
+            body.get("model"), body.get("chat_template_kwargs"), auth[:14]))
+        if not auth.startswith("Bearer nvapi-"):
+            return self.reply(401, {"status": 401, "title": "Unauthorized", "detail": "Invalid API key"})
+        user = body["messages"][-1]["content"]
+        question = user.split("Question:")[-1].strip() if "Question:" in user else user
+        wiki = "Wikipedia:" in user
+        text = "Mock NIM answer for: %s %s\nSOURCES: 1" % (question, "Wikipedia says he is the main antagonist of the Zelda series." if wiki else "Use the firecracker.")
+        self.reply(200, {"id": "chatcmpl-mock", "object": "chat.completion", "model": body.get("model"),
+                         "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}],
+                         "usage": {"prompt_tokens": 10, "completion_tokens": 20}})
+
+
+sys.stderr.write("mock_api: listening on 127.0.0.1:%d (mode %s)\n" % (PORT, MODE))
+HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

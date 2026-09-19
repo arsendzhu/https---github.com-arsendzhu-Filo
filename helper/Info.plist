@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Filo Helper</string>
+	<key>CFBundleDisplayName</key>
+	<string>Filo Helper</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.filo.helper</string>
+	<key>CFBundleExecutable</key>
+	<string>filo-helper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Filo listens to your question only while you hold the push-to-talk key.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Filo turns your spoken question into text, on this Mac, only while you hold the push-to-talk key.</string>
+</dict>
+</plist>
