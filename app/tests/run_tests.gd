@@ -31,6 +31,7 @@ func _init() -> void:
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
 	await _test_prefetch()
+	await test_golden_questions_eval()
 	await _test_speaker_continuation()
 	await _test_streaming_and_pacing()
 	await _test_streaming_agent()
@@ -829,6 +830,7 @@ func _make_pipeline(script: ScriptedModel, wikis = null, prefetch: bool = false)
 
 
 func _test_router() -> void:
+	check(QueryRouter.rewrite("What is Oongka's role in Crimson Desert", "Crimson Desert").wiki == "Oongka", "a possessive is dropped from the wiki query (Oongka's -> Oongka): " + QueryRouter.rewrite("What is Oongka's role in Crimson Desert", "Crimson Desert").wiki)
 	var games := [{"name": "Terraria", "aliases": ["terraria"]}, {"name": "Dark Souls", "aliases": ["dark souls"]}, {"name": "Dark Souls 3", "aliases": ["dark souls 3", "dark souls iii"]}]
 	for t in ["mute", "Stop.", "hey filo, be quiet", "unmute", "never mind", "repeat that", "Filo stop please"]:
 		check(QueryRouter.classify(t) == "command", "'%s' is a command" % t)
@@ -1389,3 +1391,69 @@ func _test_speaker_continuation() -> void:
 		await create_timer(0.1).timeout
 	check(events.count("started") == 1 and events.count("finished") == 1, "a plain utterance (no continuation) behaves as before")
 	sp.queue_free()
+
+
+# ------------------------------------------------------------------------------- golden questions (Tier 1)
+
+## Every golden question goes through the real AnswerPipeline with a mocked model that answers strictly from the tool
+## result it is given (an extractive stand-in for the LLM): the expected ROUTE must be taken (tool loop / local notes /
+## no tools) and the key terms of the mocked source must appear in the spoken answer.
+func test_golden_questions_eval() -> void:
+	var data = JSON.parse_string(FileAccess.get_file_as_string(FiloConfig.project_root().path_join("tests/golden_questions.json")))
+	check(typeof(data) == TYPE_DICTIONARY and data.questions.size() >= 24, "the golden set loads (%d questions)" % (data.questions.size() if typeof(data) == TYPE_DICTIONARY else 0))
+	var per_game := {}
+	var bench := 0
+	var routes_ok := 0
+	var terms_ok := 0
+	var total := 0
+	for q in data.questions:
+		if q.get("bench", false):
+			bench += 1
+		var g := str(q.game)
+		if g != "":
+			per_game[g] = int(per_game.get(g, 0)) + 1
+		var s := ScriptedModel.new()
+		s.handler = func(_m: String, msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+			var src := ""
+			for m in msgs:
+				if m.role == "tool" and str(m.content).contains("wiki_page"):
+					var body := str(m.content)
+					src = body.get_slice(">\n", 1).get_slice("\n</tool_result>", 0)
+			var sentences := SentenceStreamer.split_sentences(src)
+			return _reply(" ".join(sentences.slice(0, 3)) if not sentences.is_empty() else "I could not find that.")
+		var p := _make_pipeline(s, null, true)
+		p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+			p.research._last_titles = [str(q.page)]
+			return {"ok": true, "text": "1. " + str(q.page)}
+		p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary:
+			return {"ok": true, "text": str(q.source), "source": {"kind": "web", "title": str(q.page), "url": "https://example.test/wiki/" + str(q.page).uri_encode()}}
+		var r: Dictionary = await p.ask(str(q.question))
+		total += 1
+		var route := str(r.get("route", ""))
+		var want := str(q.route)
+		var route_ok := false
+		match want:
+			"tool":
+				route_ok = route == "tool_loop" and not s.calls.is_empty() and int(r.get("timing", {}).get("tool_calls", 0)) >= 1
+			"local":
+				route_ok = route == "local" and s.calls.is_empty()
+			"smalltalk", "command":
+				route_ok = route == want and s.calls.is_empty()
+		check(route_ok, "[%s] '%s' -> route %s (got %s, %d model calls)" % [q.id, q.question, want, route, s.calls.size()])
+		routes_ok += 1 if route_ok else 0
+		var answer := str(r.get("text", "")).to_lower()
+		var groups_ok := true
+		for group in q.expect:
+			var hit := false
+			for alt in group:
+				if answer.contains(str(alt).to_lower()):
+					hit = true
+			groups_ok = groups_ok and hit
+		check(r.ok and groups_ok, "[%s] the answer contains the key terms %s: '%s'" % [q.id, str(q.expect), answer.left(160)])
+		terms_ok += 1 if (r.ok and groups_ok) else 0
+		check(r.ok and not answer.contains("http") and not answer.contains("*") and not answer.contains("<tool_result"), "[%s] the answer is plain spoken text" % q.id)
+		p.free()
+	for g in ["Terraria", "Sekiro: Shadows Die Twice", "Dark Souls", "Crimson Desert"]:
+		check(int(per_game.get(g, 0)) >= 6, "the golden set has at least 6 questions for %s (%d)" % [g, int(per_game.get(g, 0))])
+	check(bench == 8, "8 questions are marked for the live benchmark (%d)" % bench)
+	print("golden set: %d/%d routed as expected, %d/%d answers contain their key terms" % [routes_ok, total, terms_ok, total])

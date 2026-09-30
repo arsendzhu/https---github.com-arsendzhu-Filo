@@ -215,12 +215,12 @@ func _finish(ok: bool, text: String, stats: Dictionary, t0: int, error: String) 
 	var out := {
 		"ok": ok and clean != "", "text": clean, "sources": stats.sources, "model": stats.model,
 		"rounds": stats.rounds, "tool_calls": stats.tool_calls, "model_ms": stats.model_ms, "tool_ms": stats.tool_ms,
-		"first_response_ms": stats.first_response_ms, "total_ms": total,
+		"first_response_ms": stats.first_response_ms, "ttft_ms": stats.get("ttft_ms", -1), "total_ms": total,
 		"error": error if error != "" else ("The research model gave an empty answer." if ok and clean == "" else ""),
 	}
-	FiloLog.info("Research %s: model=%s rounds=%d tools=%d first_response=%dms model=%dms tools=%dms total=%dms" % [
+	FiloLog.info("Research %s: model=%s rounds=%d tools=%d first_response=%dms first_token=%dms model=%dms tools=%dms total=%dms" % [
 		"done" if out.ok else "FAILED", out.model if out.model != "" else "-", out.rounds, out.tool_calls,
-		out.first_response_ms, out.model_ms, out.tool_ms, out.total_ms])
+		out.first_response_ms, out.ttft_ms, out.model_ms, out.tool_ms, out.total_ms])
 	return out
 
 
@@ -255,6 +255,7 @@ func _run_loop(entry: Dictionary, messages: Array, stats: Dictionary) -> Diction
 		stats.model_ms += int(resp.latency_ms)
 		if int(stats.first_response_ms) < 0:
 			stats.first_response_ms = int(resp.latency_ms)
+			stats["ttft_ms"] = int(resp.get("ttft_ms", -1))
 		stats.model = str(resp.get("model", entry.id))
 		var msg: Dictionary = resp.message
 		var calls := tool_calls_of(msg)
@@ -448,7 +449,7 @@ func _prefetch(messages: Array, stats: Dictionary) -> void:
 ## (so an unrelated top hit is not fetched and the model decides instead). "" = none.
 static func _pick_prefetch_page(titles: Array, query: String) -> String:
 	var q := PackedStringArray()
-	for w in QueryRouter.normalize(query).split(" ", false):
+	for w in QueryRouter.normalize(query).replace("'s", "").split(" ", false):
 		if w.length() >= 3 and not (w in QueryRouter.STOP_WORDS):
 			q.append(w)
 	if q.is_empty():

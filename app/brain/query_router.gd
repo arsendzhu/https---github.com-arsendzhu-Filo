@@ -216,6 +216,8 @@ static func rewrite(question: String, game: String, session_topic: String = "") 
 	var wiki := entity if entity != "" else kw
 	if followup and session_topic != "" and entity == "":
 		wiki = (session_topic + " " + kw).strip_edges()
+	wiki = wiki.replace("'s", "").replace("\u2019s", "")       # "Oongka's role" searches the wiki for "Oongka"
+	topic = topic.replace("'s", "").replace("\u2019s", "")
 	var web := ("%s %s" % [game, wiki if wiki != "" else kw]).strip_edges()
 	if wiki == "":
 		wiki = norm

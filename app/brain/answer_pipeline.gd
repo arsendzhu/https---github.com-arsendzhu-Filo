@@ -181,6 +181,7 @@ func ask(question: String, on_sentence: Callable = Callable()) -> Dictionary:
 		var hints := {"force_tool": true, "wiki_query": rw.wiki, "web_query": rw.web, "game": game_name, "tag": tag, "on_sentence": on_sentence}
 		var rr: Dictionary = await research.answer(user_content(question, passages, rw, game_name), game_name, hints)
 		if rr.ok:
+			FiloLog.info("[%s] done: route=tool_loop model=%s first_token=%dms model=%dms tools=%dms total=%dms rounds=%d tool_calls=%d" % [tag, rr.model, rr.get("ttft_ms", -1), rr.model_ms, rr.tool_ms, rr.total_ms, rr.rounds, rr.tool_calls])
 			_remember(question, rr.text, rw.topic)
 			return {
 				"ok": true, "text": rr.text, "spoken": rr.text, "sources": rr.sources, "used_web": true,
@@ -340,6 +341,7 @@ func _kb_only(passages: Array, confidence: float) -> Dictionary:
 		"used_web": is_web,
 		"confidence": confidence,
 		"model": "notes-only",
+		"route": "local",
 	}
 
 
@@ -375,7 +377,7 @@ func user_content(question: String, passages: Array, rewrite: Dictionary = {}, g
 	if not history.is_empty():
 		var turns := PackedStringArray()
 		for h in history:
-			turns.append("Player: %s\nFilo: %s" % [str(h.q), str(h.a).left(300)])
+			turns.append("Player: %s\nFilo: %s" % [str(h.q), str(h.a).left(200)])
 		parts.append("Recent conversation:\n" + "\n".join(turns))
 	if passages.is_empty():
 		parts.append("Notes: none matched this question.")

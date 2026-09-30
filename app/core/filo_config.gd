@@ -13,7 +13,7 @@ const DEFAULTS := {
 	"effort": "low",
 	"max_tokens": 700,
 	"refusal_fallbacks": true,
-	"nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b", "max_tokens": 500, "temperature": 0.4, "reasoning": false},
+	"nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b", "max_tokens": 220, "temperature": 0.4, "reasoning": false, "keepalive": true, "max_requests_per_minute": 35},
 	"research": {
 		"enabled": true,
 		"models": [
@@ -24,7 +24,9 @@ const DEFAULTS := {
 		"max_rounds": 4,
 		"max_tool_calls": 6,
 		"max_page_chars": 6000,
-		"max_tokens": 350,
+		"max_tokens": 160,          # a 1-2 sentence spoken answer is ~60 tokens; tool calls are shorter still
+		"prefetch": true,           # run the first wiki search + page app-side before the model is asked (see docs)
+		"stream": true,             # server-sent events: time to first token is logged, first sentence can be spoken early
 		"temperature": 0.3,
 		"attempt_timeout": 20.0,
 		"tool_timeout": 10.0,

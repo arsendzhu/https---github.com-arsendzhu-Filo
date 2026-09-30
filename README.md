@@ -77,6 +77,10 @@ untrusted data (wrapped, sanitized, size-capped; private/loopback addresses are 
 reasoning text never reaches the bubble or the voice. If every model in the chain fails, Filo falls
 back to Claude (when a key exists) and then to the plain Wikipedia/notes path.
 
+**Speed.** Four things keep a researched answer fast: (1) *prefetch* (`research.prefetch`): the wiki search and the best page are fetched app-side before the first model call, so one model round trip usually answers instead of three (the model still gets every tool); (2) one persistent HTTPS connection to NIM (`nim.keepalive`) instead of a new TLS handshake per request; (3) streaming (`research.stream`): time to first token is logged for every request and the first complete sentence is spoken while the rest is still being written (`tts.stream_first_sentence`; it stays one utterance, the rest is appended and synthesized in the background); (4) small `max_tokens`, request pacing under the free tier's ~40/min (`nim.max_requests_per_minute`, so bursts wait instead of getting a 429) and a 15-minute tool-result cache. The log shows each request: `[req N] done: route=tool_loop model=... first_token=...ms model=...ms tools=...ms total=...ms`.
+
+**Live benchmark** (the only thing that may call the live API): `NVIDIA_API_KEY=nvapi-... python3 scripts/bench_live.py --label baseline --out logs/bench_baseline.json`, later `--label final --out logs/bench_final.json` (it compares with the baseline; add `--no-prefetch` or `--no-stream` to measure a single change). It runs the 8 fixed questions of `tests/golden_questions.json` (2 per game), uses at most 20 requests and 30 per minute, never reads `.env` (the key must be in the environment) and never prints the key. `--smoke` only checks that the configured models are listed and that `tool_choice=required` is accepted.
+
 **Model chain** — `research.models` in `config.json`, tried in order; a model that returns
 404/410/429/5xx or times out is skipped for `breaker_seconds` (so a dead model costs one timeout).
 Default: `deepseek-ai/deepseek-v4.1-flash` → `nvidia/nemotron-3-super-120b-a12b` → Claude.
@@ -131,6 +135,10 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `behavior.reprompt_phrases`, `behavior.farewell_phrases` | lists | what Filo says after an answer / on "bye filo" |
 | `wake_word.enabled`, `wake_word.phrase`, `wake_word.bye_phrase`, `wake_word.silence_ms` | true, `hey filo`, `bye filo`, 1500 | always-on wake word, the goodbye phrase, the pause that ends a question |
 | `hotkey.key`, `hotkey.modifiers` | `space`, `["option"]` | push-to-talk key |
+| `research.prefetch`, `research.stream`, `research.max_tokens`, `research.force_first_tool` | true, true, 160, `required` | speed and behaviour of the tool loop (see Research agent) |
+| `nim.keepalive`, `nim.max_requests_per_minute` | true, 35 | persistent NIM connection; client-side pacing under the free tier limit |
+| `tts.stream_first_sentence` | true | speak the first sentence of a streamed answer while the rest is still being written |
+| `session.idle_reset_seconds` | 900 | the conversation memory (game + last turns) is cleared after this much idle time or when the game changes |
 | `speech.preroll_ms`, `speech.hangover_ms`, `speech.ptt_tail_ms` | 450, 900, 300 | audio kept from before the key press / wake phrase, silence that ends a question, how long push-to-talk keeps recording after the key is released |
 | `speech.keep_mic_warm` | `auto` | keep the microphone engine running so the pre-roll exists (only while the wake word is on, never while Filo talks or the mic is muted); `off` = cold start on every press |
 | `speech.hotwords`, `speech.term_correction` | `{}`, true | extra recogniser hints per game (`{"terraria": ["Skeletron"]}`), on top of `profiles/vocabulary.json`; repair mis-heard game terms in the transcript |

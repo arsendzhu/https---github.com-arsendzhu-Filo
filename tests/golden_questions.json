@@ -1,0 +1,509 @@
+{
+ "version": 1,
+ "note": "Each entry: the expected route (tool = the tool loop, local = the loaded game's notes answer it, smalltalk/command = no tools) and groups of alternative key terms that must appear in the answer. `page`/`source` are the mocked wiki page the eval feeds the tool loop; bench=true marks the 8 questions scripts/bench_live.py samples (2 per game).",
+ "questions": [
+  {
+   "id": "t1",
+   "game": "Terraria",
+   "question": "How do I beat the Eye of Cthulhu in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "phase"
+    ],
+    [
+     "dodge",
+     "avoid"
+    ],
+    [
+     "arena",
+     "platform"
+    ]
+   ],
+   "page": "Eye of Cthulhu",
+   "source": "The Eye of Cthulhu is an early boss summoned with a Suspicious Looking Eye. It has two phases and becomes much faster in the second one. Fight it on a flat arena with platforms and keep moving to dodge its charges.",
+   "bench": true
+  },
+  {
+   "id": "t2",
+   "game": "Terraria",
+   "question": "What does the Wall of Flesh drop in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "hardmode"
+    ],
+    [
+     "pwnhammer"
+    ]
+   ],
+   "page": "Wall of Flesh",
+   "source": "Defeating the Wall of Flesh starts Hardmode. It drops the Pwnhammer, which is needed to break the hardmode altars, plus one of several strong weapons.",
+   "bench": false
+  },
+  {
+   "id": "t3",
+   "game": "Terraria",
+   "question": "How do I summon Skeletron in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "old man"
+    ],
+    [
+     "night"
+    ],
+    [
+     "dungeon"
+    ]
+   ],
+   "page": "Skeletron",
+   "source": "Skeletron is summoned by talking to the Old Man at the entrance of the Dungeon at night. He attacks with spinning hands, so bring a large arena and plenty of healing potions.",
+   "bench": true
+  },
+  {
+   "id": "t4",
+   "game": "Terraria",
+   "question": "Where do I find the Guide Voodoo Doll in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "underworld"
+    ],
+    [
+     "lava"
+    ],
+    [
+     "wall of flesh"
+    ]
+   ],
+   "page": "Guide Voodoo Doll",
+   "source": "The Guide Voodoo Doll is dropped by demons in the Underworld. Throwing it into lava while the Guide is alive summons the Wall of Flesh.",
+   "bench": false
+  },
+  {
+   "id": "t5",
+   "game": "Terraria",
+   "question": "What is the best pickaxe before hardmode in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "molten"
+    ],
+    [
+     "hellstone"
+    ]
+   ],
+   "page": "Molten Pickaxe",
+   "source": "Before Hardmode the Molten Pickaxe is the best mining tool. It is crafted from Hellstone bars at a Hellforge and can mine Meteorite and Hellstone.",
+   "bench": false
+  },
+  {
+   "id": "t6",
+   "game": "Terraria",
+   "question": "How do I get the Terra Blade in Terraria",
+   "route": "tool",
+   "expect": [
+    [
+     "true"
+    ],
+    [
+     "anvil",
+     "craft"
+    ]
+   ],
+   "page": "Terra Blade",
+   "source": "The Terra Blade is crafted at a Mythril Anvil from the True Night's Edge and the True Excalibur. Both of those are crafted from earlier swords and Broken Hero Sword pieces.",
+   "bench": false
+  },
+  {
+   "id": "s1",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "How do I beat the Guardian Ape in Sekiro",
+   "route": "local",
+   "expect": [
+    [
+     "sunken valley"
+    ],
+    [
+     "phase",
+     "phases"
+    ]
+   ],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "s2",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "How do I beat Lady Butterfly in Sekiro",
+   "route": "local",
+   "expect": [
+    [
+     "hidden temple"
+    ],
+    [
+     "boss"
+    ]
+   ],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "s3",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "What is posture in Sekiro",
+   "route": "local",
+   "expect": [
+    [
+     "posture"
+    ],
+    [
+     "deflect",
+     "block"
+    ]
+   ],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "s4",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "How do I beat the Chained Ogre in Sekiro",
+   "route": "local",
+   "expect": [
+    [
+     "stairs",
+     "ashina"
+    ],
+    [
+     "ogre"
+    ]
+   ],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "s5",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "Where do I find the Shinobi Firecracker in Sekiro",
+   "route": "tool",
+   "expect": [
+    [
+     "robert"
+    ],
+    [
+     "sculptor",
+     "outskirts",
+     "merchant"
+    ]
+   ],
+   "page": "Shinobi Firecracker",
+   "source": "The Shinobi Firecracker is unlocked by giving Robert's Firecrackers to the Sculptor. Robert's Firecrackers are sold by the Memorial Mob merchant in the Ashina Outskirts.",
+   "bench": true
+  },
+  {
+   "id": "s6",
+   "game": "Sekiro: Shadows Die Twice",
+   "question": "Who is Isshin the Sword Saint in Sekiro",
+   "route": "tool",
+   "expect": [
+    [
+     "ashina"
+    ],
+    [
+     "final",
+     "last",
+     "boss"
+    ]
+   ],
+   "page": "Isshin Ashina",
+   "source": "Isshin Ashina, the Sword Saint, is the final boss of the main story and the head of the Ashina clan. He fights in several phases and changes from a straightforward swordsman to something far more dangerous.",
+   "bench": true
+  },
+  {
+   "id": "d1",
+   "game": "Dark Souls",
+   "question": "Where do I find the Lordvessel in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "gwynevere",
+     "frampt"
+    ],
+    [
+     "anor londo",
+     "bells",
+     "bell"
+    ]
+   ],
+   "page": "Lordvessel",
+   "source": "The Lordvessel is given to you by Gwynevere in Anor Londo after you defeat Ornstein and Smough. You need it to place the Lord Souls at the Kiln of the First Flame.",
+   "bench": true
+  },
+  {
+   "id": "d2",
+   "game": "Dark Souls",
+   "question": "How do I beat Ornstein and Smough in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "ornstein"
+    ],
+    [
+     "smough"
+    ],
+    [
+     "kill",
+     "defeat",
+     "fight"
+    ]
+   ],
+   "page": "Ornstein and Smough",
+   "source": "Ornstein and Smough are the boss duo guarding Anor Londo's cathedral. Killing one first makes the other stronger, so fight them separately where you can.",
+   "bench": true
+  },
+  {
+   "id": "d3",
+   "game": "Dark Souls",
+   "question": "How do I reach Sen's Fortress in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "undead burg",
+     "undead parish",
+     "valley of drakes",
+     "bell"
+    ],
+    [
+     "bell",
+     "bells",
+     "reach"
+    ]
+   ],
+   "page": "Sen's Fortress",
+   "source": "Sen's Fortress is reached from the Undead Parish through the door opened by ringing the first Bell of Awakening. It is full of traps and is guarded by the Iron Golem.",
+   "bench": false
+  },
+  {
+   "id": "d4",
+   "game": "Dark Souls",
+   "question": "Where is the Firelink Shrine bonfire in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "firelink"
+    ],
+    [
+     "hub",
+     "central",
+     "start"
+    ]
+   ],
+   "page": "Firelink Shrine",
+   "source": "Firelink Shrine is the central hub of the game, reached after leaving the Undead Asylum. Its bonfire is where you return to link fires and meet many characters.",
+   "bench": false
+  },
+  {
+   "id": "d5",
+   "game": "Dark Souls",
+   "question": "Where do I upgrade the Estus Flask in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "andre",
+     "frampt",
+     "kindle",
+     "bonfire"
+    ],
+    [
+     "estus"
+    ]
+   ],
+   "page": "Estus Flask",
+   "source": "The Estus Flask is refilled at bonfires and the number of charges grows when you kindle a bonfire with Humanity. Andre of Astora cannot upgrade it, but kindling does.",
+   "bench": false
+  },
+  {
+   "id": "d6",
+   "game": "Dark Souls",
+   "question": "How do I kill Gwyn Lord of Cinder in Dark Souls",
+   "route": "tool",
+   "expect": [
+    [
+     "gwyn"
+    ],
+    [
+     "parry",
+     "parries",
+     "deflect"
+    ],
+    [
+     "fire",
+     "kiln"
+    ]
+   ],
+   "page": "Gwyn, Lord of Cinder",
+   "source": "Gwyn, Lord of Cinder, is the final boss fought at the Kiln of the First Flame. He is relentless and vulnerable to parries, so learn his timing.",
+   "bench": false
+  },
+  {
+   "id": "c1",
+   "game": "Crimson Desert",
+   "question": "Who is Kliff in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "kliff"
+    ],
+    [
+     "main",
+     "protagonist",
+     "player",
+     "character"
+    ]
+   ],
+   "page": "Kliff",
+   "source": "Kliff is the main playable character of Crimson Desert, a warrior who fights to protect his companions. He belongs to the Greymane mercenary company.",
+   "bench": true
+  },
+  {
+   "id": "c2",
+   "game": "Crimson Desert",
+   "question": "What is Oongka's role in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "oongka"
+    ],
+    [
+     "ally",
+     "companion",
+     "comrade",
+     "warrior"
+    ]
+   ],
+   "page": "Oongka",
+   "source": "Oongka is a brawler and one of Kliff's closest comrades in the Greymane company. He is known for heavy, powerful attacks.",
+   "bench": true
+  },
+  {
+   "id": "c3",
+   "game": "Crimson Desert",
+   "question": "How do I recruit Damiane in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "damiane"
+    ],
+    [
+     "recruit",
+     "join",
+     "quest"
+    ]
+   ],
+   "page": "Damiane",
+   "source": "Damiane joins the party through a story quest. Complete the related mission to recruit her as a companion.",
+   "bench": false
+  },
+  {
+   "id": "c4",
+   "game": "Crimson Desert",
+   "question": "Where do I find the Greymane camp in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "greymane"
+    ],
+    [
+     "camp",
+     "base"
+    ]
+   ],
+   "page": "Greymane",
+   "source": "The Greymane camp is the mercenaries' home base, which serves as a hub between missions. Talk to the company members there to pick up work.",
+   "bench": false
+  },
+  {
+   "id": "c5",
+   "game": "Crimson Desert",
+   "question": "How do I beat the Reed Devil boss in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "reed devil"
+    ],
+    [
+     "dodge",
+     "attack",
+     "phase",
+     "weak"
+    ]
+   ],
+   "page": "Reed Devil",
+   "source": "The Reed Devil is a large boss fought in the marsh. Dodge its sweeping attacks and strike when it stops to recover.",
+   "bench": false
+  },
+  {
+   "id": "c6",
+   "game": "Crimson Desert",
+   "question": "What weapons can Kliff use in Crimson Desert",
+   "route": "tool",
+   "expect": [
+    [
+     "sword"
+    ],
+    [
+     "kliff"
+    ]
+   ],
+   "page": "Kliff",
+   "source": "Kliff can wield swords, spears and other close-combat weapons, switching between them as fights demand. His combat style rewards mixing attacks.",
+   "bench": false
+  },
+  {
+   "id": "x1",
+   "game": "",
+   "question": "thanks!",
+   "route": "smalltalk",
+   "expect": [],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "x2",
+   "game": "",
+   "question": "how are you",
+   "route": "smalltalk",
+   "expect": [],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "x3",
+   "game": "",
+   "question": "stop",
+   "route": "command",
+   "expect": [],
+   "page": "",
+   "source": "",
+   "bench": false
+  },
+  {
+   "id": "x4",
+   "game": "",
+   "question": "mute",
+   "route": "command",
+   "expect": [],
+   "page": "",
+   "source": "",
+   "bench": false
+  }
+ ]
+}
