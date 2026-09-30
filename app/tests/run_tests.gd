@@ -26,6 +26,10 @@ func _init() -> void:
 	_test_bubble_controls()
 	_test_web_helpers()
 	await _test_research()
+	_test_router()
+	await test_unknown_game_still_uses_tools()
+	await _test_routing_paths()
+	await test_followup_uses_session_context()
 	print("\n%d passed, %d failed" % [passes, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -208,7 +212,7 @@ func _test_dotenv_and_providers() -> void:
 	cfg.data["anthropic_api_key"] = "sk-ant-..."
 	cfg.normalize_keys()
 	check(cfg.get_value("anthropic_api_key") == "" and cfg.provider() == "none", "placeholder key is ignored -> none")
-	cfg.data["anthropic_api_key"] = "nvapi-abcdefghijklmnopqrstuvwxyz0123456789"
+	cfg.data["anthropic_api_key"] = "nvapi-fixture"
 	cfg.normalize_keys()
 	check(cfg.get_value("anthropic_api_key") == "" and cfg.get_value("nvidia_api_key").begins_with("nvapi-"), "nvapi key under ANTHROPIC_API_KEY moves to nvidia_api_key")
 	check(cfg.provider() == "nim", "auto provider picks nim when only the NVIDIA key exists")
@@ -784,3 +788,256 @@ func _test_research() -> void:
 	var wrapped := ResearchAgent.wrap_result("t", "a\u0001b", 100)
 	check(wrapped == "<tool_result name=\"t\" trust=\"untrusted\">\nab\n</tool_result>", "wrap_result envelope")
 	a2.free()
+
+
+# ------------------------------------------------------- routing / any game / session (workstream 1)
+
+class StubClaude extends ClaudeClient:
+	var reply := {"ok": true, "text": "Claude here: try fire against the Eye of Cthulhu.", "citations": [], "searched": [], "error": "", "model": "claude-stub"}
+	var asked := 0
+
+	func has_key() -> bool:
+		return true
+
+	func ask(_system_prompt: String, _user_content: String, _tools: Array = []) -> Dictionary:
+		asked += 1
+		return reply
+
+
+func _make_pipeline(script: ScriptedModel, wikis = null) -> AnswerPipeline:
+	var cfg := FiloConfig.new()
+	cfg.data = FiloConfig.DEFAULTS.duplicate(true)
+	if wikis != null:
+		cfg.data["research"]["wikis"] = wikis
+	var prof := GameProfile.load_from(FiloConfig.project_root().path_join("profiles"), "sekiro")
+	var p := AnswerPipeline.new()
+	p.setup(cfg, prof)
+	p.nim.api_key = "nvapi-test"          # makes the research path available; no request is ever sent (scripted transport)
+	p.research.models = ResearchAgent.normalize_models(["model-a"])
+	p.research.transport = Callable(script, "handle")
+	p.research.sleeper = func(_s: float) -> void: pass
+	p.research.claude_fallback = false
+	p.research.discovered_path = ""
+	p.research.warmup_probe = false
+	return p
+
+
+func _test_router() -> void:
+	var games := [{"name": "Terraria", "aliases": ["terraria"]}, {"name": "Dark Souls", "aliases": ["dark souls"]}, {"name": "Dark Souls 3", "aliases": ["dark souls 3", "dark souls iii"]}]
+	for t in ["mute", "Stop.", "hey filo, be quiet", "unmute", "never mind", "repeat that", "Filo stop please"]:
+		check(QueryRouter.classify(t) == "command", "'%s' is a command" % t)
+	for t in ["thanks!", "Hi", "how are you", "thank you filo", "good night", "can you hear me?", "what can you do", "Hey Filo"]:
+		check(QueryRouter.classify(t) == "smalltalk", "'%s' is small talk" % t)
+	for t in ["How do I beat the Eye of Cthulhu in Terraria", "where do I find the Lordvessel", "what about the second phase", "who is Kliff in Crimson Desert", "How do I stop the ogre from grabbing me", "what does mute do in this game"]:
+		check(QueryRouter.classify(t) == "factual", "'%s' is a factual question" % t)
+	check(QueryRouter.classify("   ") == "empty", "blank text is empty")
+	check(QueryRouter.command_for("Hey Filo, stop") == "stop" and QueryRouter.command_for("mute please") == "mute", "command_for ignores fillers")
+
+	check(QueryRouter.detect_game("How do I beat the Eye of Cthulhu in Terraria", games).name == "Terraria", "a known game is detected by alias")
+	check(QueryRouter.detect_game("where is the firelink shrine in dark souls 3", games).name == "Dark Souls 3", "the longest alias wins (Dark Souls 3 over Dark Souls)")
+	var guess := QueryRouter.detect_game("How do I beat the False Knight in Hollow Knight?", games)
+	check(guess.name == "Hollow Knight" and guess.source == "pattern", "an unknown game is guessed from 'in <Capitalised Name>': " + str(guess))
+	check(QueryRouter.detect_game("what is the best build for it", games).name == "", "no game mentioned -> none")
+	check(QueryRouter.same_game("Sekiro: Shadows Die Twice", "Sekiro") and not QueryRouter.same_game("Terraria", "Sekiro: Shadows Die Twice") and QueryRouter.same_game("Dark Souls III", "dark souls 3", games), "same_game compares names and aliases")
+
+	var rw := QueryRouter.rewrite("How do I beat the Eye of Cthulhu in Terraria?", "Terraria")
+	check(rw.wiki == "Eye of Cthulhu" and rw.web.begins_with("Terraria") and rw.web.contains("Eye of Cthulhu") and rw.topic == "Eye of Cthulhu" and not rw.followup, "rewrite keeps the game and the key term: " + str(rw))
+	rw = QueryRouter.rewrite("hey filo can you tell me where the guide is in terraria", "Terraria")
+	check(not rw.wiki.contains("filo") and not rw.wiki.contains("terraria") and rw.wiki.contains("guide"), "rewrite strips filler and the game name from the wiki query: " + str(rw))
+	rw = QueryRouter.rewrite("what about the second phase", "Terraria", "Eye of Cthulhu")
+	check(rw.followup and rw.wiki.contains("Eye of Cthulhu") and rw.wiki.contains("second phase") and rw.web.contains("Terraria"), "a follow-up inherits the last topic: " + str(rw))
+	rw = QueryRouter.rewrite("how do I beat Lady Butterfly", "Sekiro", "Eye of Cthulhu")
+	check(not rw.followup and rw.wiki == "Lady Butterfly", "a new question with its own subject is not treated as a follow-up: " + str(rw))
+	var wikis := ResearchAgent.normalize_wikis({"terraria": "https://terraria.wiki.gg/", "x": {"base_url": "https://x.example", "aliases": ["ex"]}, "bad": 5, "empty": ""})
+	check(wikis.size() == 2 and wikis.terraria.base_url == "https://terraria.wiki.gg" and wikis.terraria.api_path == "/api.php" and wikis.terraria.name == "Terraria wiki" and wikis.x.aliases.has("ex") and wikis.x.aliases.has("x"), "the one-line wiki form is normalised: " + str(wikis))
+	check(ResearchAgent.wiki_base_of("https://terraria.wiki.gg/wiki/Eye_of_Cthulhu") == "https://terraria.wiki.gg" and ResearchAgent.wiki_base_of("https://hollowknight.fandom.com/wiki/X") == "https://hollowknight.fandom.com" and ResearchAgent.wiki_base_of("https://www.reddit.com/r/x") == "" and ResearchAgent.wiki_base_of("https://en.wikipedia.org/wiki/X") == "" and ResearchAgent.wiki_base_of("ftp://x") == "", "wiki_base_of recognises wiki hosts only")
+
+
+func test_unknown_game_still_uses_tools() -> void:
+	# The reported bug: "How do I beat the Eye of Cthulhu in Terraria" made no tool call at all. Four ways it used to be skipped:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	# (1) a game with no configured wiki, model does what it is told (tool_choice=required -> a tool call)
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _opts: Dictionary, n: int) -> Dictionary:
+		if n == 1:
+			return _tool_reply([["web_search", '{"query": "Terraria Eye of Cthulhu guide"}', "t1"]])
+		return _reply("Dodge its charges, then kill the servants in phase two. SOURCES: none")
+	var p := _make_pipeline(s, {})
+	var searched := []
+	p.research.tool_overrides["web_search"] = func(args: Dictionary) -> Dictionary:
+		searched.append(args.query)
+		return {"ok": true, "text": "1. Eye of Cthulhu - Terraria Wiki\n   https://terraria.wiki.gg/wiki/Eye_of_Cthulhu\n   Phase two starts at half health."}
+	var r: Dictionary = await p.ask(Q)
+	check(r.ok and r.route == "tool_loop" and r.game == "Terraria", "unknown game: routed to the tool loop with the game detected: " + str(r.get("route")))
+	check(s.calls.size() == 2 and s.calls[0].opts.tool_choice == "required" and s.calls[1].opts.tool_choice == "auto", "unknown game: the first request forces a tool call, the next is free")
+	check(searched.size() == 1 and r.timing.tool_calls == 1, "unknown game: at least one tool call ran")
+	check(r.text.length() > 10 and not r.text.contains("SOURCES") and not r.text.contains("*") and not r.text.contains("\n"), "unknown game: a final spoken-style answer: '%s'" % r.text)
+	var user_msg: String = s.calls[0].messages[1].content
+	check(user_msg.contains("Game: Terraria") and user_msg.contains("Notes: none matched") and not user_msg.contains("Guardian Ape"), "unknown game: the Sekiro notes are not fed to a Terraria question")
+	p.free()
+
+	# (2) the model ignores the instruction and answers from memory: the search is run for it
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _opts: Dictionary, n: int) -> Dictionary:
+		if n == 1:
+			return _reply("The Eye of Cthulhu is beaten by shooting it. SOURCES: none")
+		return _reply("Per the search: fight it near a platform arena.")
+	p = _make_pipeline(s, {})
+	searched = []
+	p.research.tool_overrides["web_search"] = func(args: Dictionary) -> Dictionary:
+		searched.append(args.query)
+		return {"ok": true, "text": "1. Eye of Cthulhu\n   https://terraria.wiki.gg/wiki/Eye_of_Cthulhu\n   boss"}
+	r = await p.ask(Q)
+	check(r.ok and searched.size() == 1 and searched[0].contains("Terraria") and searched[0].contains("Eye of Cthulhu"), "model answered from memory -> a web_search for '%s' still ran: %s" % [str(searched), str(r)])
+	check(r.text == "Per the search: fight it near a platform arena." and s.calls.size() == 2, "the memory-only answer was discarded, the grounded one used")
+	var second: Array = s.calls[1].messages
+	check(second[2].role == "assistant" and second[2].tool_calls.size() == 1 and second[3].role == "tool" and second[3].tool_call_id == second[2].tool_calls[0].id, "the forced call is recorded in the history with a matching tool_call_id")
+	p.free()
+
+	# (3) the API rejects tool_choice=required: degrade to auto, remember it, still search
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, n: int) -> Dictionary:
+		if opts.tool_choice == "required":
+			return _fail(400)
+		return _reply("Answer without tools.") if n == 2 else _reply("Grounded answer.")
+	p = _make_pipeline(s, {})
+	p.research.tool_overrides["web_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "1. r"}
+	r = await p.ask(Q)
+	check(r.ok and s.calls[0].opts.tool_choice == "required" and s.calls[1].opts.tool_choice == "auto" and r.timing.tool_calls == 1 and r.text == "Grounded answer.", "a 400 on tool_choice=required falls back to auto and the search still happens: " + str(r.get("timing")))
+	await p.ask("How do I beat the Wall of Flesh in Terraria")
+	check(s.calls[3].opts.tool_choice == "auto", "...and 'required' is not sent to that model again")
+	p.free()
+
+	# (4) a game that IS in the wiki table (Terraria ships in the defaults): the wiki is searched, not the web
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, n: int) -> Dictionary:
+		return _reply("Memory answer.") if n == 1 else _reply("From the wiki: two phases.")
+	p = _make_pipeline(s)
+	var wiki_args := []
+	p.research.tool_overrides["wiki_search"] = func(args: Dictionary) -> Dictionary:
+		wiki_args.append(args)
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	r = await p.ask(Q)
+	check(wiki_args.size() == 1 and wiki_args[0].game == "Terraria" and wiki_args[0].query == "Eye of Cthulhu" and r.text == "From the wiki: two phases.", "a configured game goes to its wiki with a clean query: " + str(wiki_args))
+	p.free()
+
+	# (5) discovery for a game that is not configured: a wiki host in the search results becomes the game's wiki
+	var a := ResearchAgent.new()
+	var cfg := FiloConfig.new()
+	cfg.data = FiloConfig.DEFAULTS.duplicate(true)
+	a.setup(cfg, null, null, null, null)
+	a.discovered_path = ""
+	var hook_calls := [0]
+	a.discover_hook = func(game: String) -> Dictionary:
+		hook_calls[0] += 1
+		return {"base_url": "https://hollowknight.wiki.gg", "api_path": "/api.php", "name": game + " wiki"}
+	var site: Dictionary = await a.resolve_site("Hollow Knight")
+	var again: Dictionary = await a.resolve_site("hollow knight")
+	check(site.base_url == "https://hollowknight.wiki.gg" and again.base_url == site.base_url and hook_calls[0] == 1, "an unknown game's wiki is discovered once and then remembered")
+	check((await a.resolve_site("Terraria")).base_url == "https://terraria.wiki.gg", "a configured game resolves without discovery")
+	a.free()
+
+
+func _test_routing_paths() -> void:
+	# starter game, no local answer (Dark Souls question while Sekiro notes are loaded) -> tool loop, and the notes are ignored
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, n: int) -> Dictionary:
+		return _tool_reply([["wiki_search", '{"game": "Dark Souls", "query": "Lordvessel"}', "d1"]]) if n == 1 else _reply("Gwynevere gives it to you in Anor Londo.")
+	var p := _make_pipeline(s)
+	var wiki_calls := [0]
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		wiki_calls[0] += 1
+		return {"ok": true, "text": "1. Lordvessel"}
+	var r: Dictionary = await p.ask("Where do I find the Lordvessel in Dark Souls?")
+	check(r.ok and r.route == "tool_loop" and r.game == "Dark Souls" and wiki_calls[0] == 1, "starter-game question (Dark Souls) uses the tool loop: " + str(r.get("route")))
+	p.free()
+
+	# a confident local answer skips the tools completely (and says why)
+	s = ScriptedModel.new()
+	p = _make_pipeline(s)
+	r = await p.ask("I'm stuck on the Guardian Ape, what am I missing?")
+	check(r.ok and s.calls.is_empty() and r.get("route", "") != "tool_loop" and r.confidence >= 0.45, "a confident local answer does not call the model tools: conf %.2f route %s" % [r.confidence, str(r.get("route"))])
+	p.free()
+
+	# small talk and commands never reach the tool loop
+	s = ScriptedModel.new()
+	p = _make_pipeline(s)
+	for talk in ["thanks!", "how are you", "Hey Filo", "who are you"]:
+		r = await p.ask(talk)
+		check(r.ok and r.route == "smalltalk" and r.text != "" and r.sources.is_empty(), "small talk '%s' is answered without tools: '%s'" % [talk, r.text])
+	for cmd in [["stop", "stop"], ["mute", "mute"], ["unmute", "unmute"], ["Hey Filo, be quiet", "stop"]]:
+		r = await p.ask(cmd[0])
+		check(r.ok and r.route == "command" and r.command == cmd[1], "command '%s' -> %s" % [cmd[0], cmd[1]])
+	check(s.calls.is_empty(), "no model request was made for small talk or commands (%d)" % s.calls.size())
+	p.free()
+
+	# a tool error is handled: the model is told, and its answer (an honest 'could not find it') is what gets spoken
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, n: int) -> Dictionary:
+		if n == 1:
+			return _tool_reply([["wiki_search", '{"game": "Terraria", "query": "Eye of Cthulhu"}', "e1"]])
+		return _reply("I couldn't reach the wiki just now, so I can't confirm that.")
+	p = _make_pipeline(s)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": false, "text": "Error: wiki search failed (Wikipedia returned HTTP 503.)."}
+	r = await p.ask("How do I beat the Eye of Cthulhu in Terraria")
+	check(r.ok and r.text.contains("couldn't reach the wiki") and s.calls[1].messages[3].content.contains("wiki search failed"), "a failing tool becomes an error message for the model and a graceful spoken answer: " + str(r.get("text")))
+	check(r.sources.is_empty(), "no source is claimed when the tool failed")
+	p.free()
+
+	# NIM unreachable -> Claude answers (tool loop first tried on the NIM chain)
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary: return _fail(0, 0.0, true)
+	p = _make_pipeline(s)
+	var claude := StubClaude.new()
+	p.research.claude = claude
+	p.research.claude_fallback = true
+	r = await p.ask("How do I beat the Eye of Cthulhu in Terraria")
+	check(r.ok and claude.asked == 1 and r.model == "claude-stub" and r.text.contains("Claude here"), "NIM unreachable -> falls back to Claude: " + str(r))
+	# ...and if Claude fails too, the caller gets a short failure (never a crash)
+	claude.reply = {"ok": false, "text": "", "citations": [], "searched": [], "error": "Claude is unavailable.", "model": "claude-stub"}
+	p.research._down.clear()
+	p.cfg.data["web_search"]["enabled"] = false      # no Wikipedia request in a unit test
+	r = await p.ask("How do I beat the Wall of Flesh in Terraria")
+	check(not r.ok and str(r.error) != "", "NIM and Claude both down -> a clear failure result: " + str(r.get("error")))
+	p.free()
+	claude.free()
+
+
+func test_followup_uses_session_context() -> void:
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, n: int) -> Dictionary:
+		return _reply("Answer %d." % n) if n % 2 == 0 else _reply("Memory %d." % n)
+	var p := _make_pipeline(s)
+	var queries := []
+	p.research.tool_overrides["wiki_search"] = func(args: Dictionary) -> Dictionary:
+		queries.append(args)
+		return {"ok": true, "text": "1. page"}
+	var r: Dictionary = await p.ask("How do I beat the Eye of Cthulhu in Terraria?")
+	check(r.ok and p.session.game == "Terraria" and p.session.last_topic() == "Eye of Cthulhu", "the first turn stores the game and the topic: %s / %s" % [p.session.game, p.session.last_topic()])
+	# the follow-up names neither the game nor the boss
+	r = await p.ask("what about the second phase?")
+	check(r.ok and r.game == "Terraria", "the follow-up stays on the current game")
+	check(queries.size() == 2 and queries[1].game == "Terraria" and queries[1].query.contains("Eye of Cthulhu") and queries[1].query.contains("second phase"), "the follow-up's search query carries the game and the previous topic: " + str(queries))
+	var content: String = ""
+	for m in s.calls[2].messages:
+		if m.role == "user":
+			content = m.content
+	check(content.contains("Game: Terraria") and content.contains("Recent conversation") and content.contains("Eye of Cthulhu") and content.contains("Session context: {\"game\":\"Terraria\",\"last_topic\":\"Eye of Cthulhu\"}"), "the prompt for the follow-up includes the recent turn and the session context: " + content.left(400))
+
+	# the memory is cleared when the game changes...
+	queries.clear()
+	await p.ask("How do I beat Lady Butterfly in Sekiro?")
+	check(p.session.game.begins_with("Sekiro") and p.session.last_topic() != "Eye of Cthulhu" and not JSON.stringify(p.session.turns).contains("Eye of Cthulhu"), "switching game clears the memory of the old one (game now '%s')" % p.session.game)
+	# ...and after a long idle gap
+	var t := [1000.0]
+	p.session.clock = func() -> float: return t[0]
+	p.session.last_active = 1000.0
+	t[0] += 5000.0
+	check(p.session.begin_question("") != "" and p.session.turns.is_empty(), "the memory is cleared after a long idle gap")
+	p.free()
+
+	var sm := SessionMemory.new()
+	sm.max_turns = 2
+	for i in 4:
+		sm.note_turn("q%d" % i, "a%d" % i, "topic%d" % i)
+	check(sm.turns.size() == 2 and sm.turns[0].q == "q2" and sm.last_topic() == "topic3", "the session keeps only the last few turns")

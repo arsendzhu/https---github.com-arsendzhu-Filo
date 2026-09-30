@@ -9,3 +9,7 @@ helper/build/
 app/native/
 tts/venv/
 tts/models/
+.venv/
+logs/
+__pycache__/
+.pytest_cache/

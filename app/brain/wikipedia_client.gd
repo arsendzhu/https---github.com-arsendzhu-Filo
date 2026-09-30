@@ -149,6 +149,22 @@ func mw_search(site: Dictionary, query: String, limit: int = 5) -> Dictionary:
 	return out
 
 
+## Does this site answer MediaWiki API calls? {ok, sitename, error}
+func mw_probe(site: Dictionary) -> Dictionary:
+	var out := {"ok": false, "sitename": "", "error": ""}
+	var res: Dictionary = await _get_json("%s?action=query&meta=siteinfo&format=json" % site_api(site))
+	if not res.ok:
+		out.error = res.error
+		return out
+	var general = (res.data.get("query", {}) if typeof(res.data) == TYPE_DICTIONARY else {}).get("general", {})
+	if typeof(general) == TYPE_DICTIONARY and str(general.get("sitename", "")) != "":
+		out.ok = true
+		out.sitename = str(general.sitename)
+	else:
+		out.error = "not a MediaWiki API"
+	return out
+
+
 ## Cleaned plain text of a page, optionally just one section. {ok, title, url, text, sections, error}
 func mw_page(site: Dictionary, title: String, section: String = "", max_chars: int = 6000) -> Dictionary:
 	var out := {"ok": false, "title": title, "url": "", "text": "", "sections": PackedStringArray(), "error": ""}

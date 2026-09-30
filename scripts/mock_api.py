@@ -40,13 +40,17 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         ua = self.headers.get("User-Agent", "")
         if url.path == "/v1/models":
-            return self.reply(200, {"object": "list", "data": [{"id": "dead-model"}, {"id": "live-model"}]})
+            return self.reply(200, {"object": "list", "data": [{"id": "dead-model"}, {"id": "live-model"}, {"id": "lazy-model"}]})
         if url.path == "/api.php":
             q = parse_qs(url.query)
             action = q.get("action", [""])[0]
             sys.stderr.write("mock_gamewiki: %s %r ua=%r\n" % (action, q.get("srsearch", q.get("page", [""]))[0], ua))
+            if action == "query" and "cthulhu" in q.get("srsearch", [""])[0].lower():
+                return self.reply(200, {"query": {"search": [{"title": "Eye of Cthulhu", "snippet": "The <span class=\"searchmatch\">Eye of Cthulhu</span> is a hardmode-independent boss"}]}})
             if action == "query":
                 return self.reply(200, {"query": {"search": [{"title": "Lordvessel", "snippet": "The <span class=\"searchmatch\">Lordvessel</span> is a key item"}, {"title": "Frampt", "snippet": ""}]}})
+            if action == "parse" and q.get("page", [""])[0].replace("_", " ") == "Eye of Cthulhu":
+                return self.reply(200, {"parse": {"title": "Eye of Cthulhu", "text": "<div><h2>Strategy</h2><p>The Eye of Cthulhu has two phases. Dodge its charges, then fight its servants.</p></div>"}})
             if action == "parse":
                 page = q.get("page", [""])[0].replace("_", " ")
                 if page != "Lordvessel":
@@ -123,6 +127,13 @@ class Handler(BaseHTTPRequestHandler):
         def final(text):
             return {"id": "chatcmpl-mock", "object": "chat.completion", "model": model, "choices": [{"index": 0, "finish_reason": "stop", "message": {
                 "role": "assistant", "content": text, "reasoning_content": "SECRET REASONING MUST NOT BE SPOKEN"}}]}
+        if model == "lazy-model":
+            # an older NIM model: rejects tool_choice=required and answers from memory instead of calling tools
+            if body.get("tool_choice") == "required":
+                return self.reply(400, {"status": 400, "title": "Bad Request", "detail": "tool_choice 'required' is not supported by this model"})
+            if last["role"] == "tool" and "Eye of Cthulhu" in last["content"]:
+                return self.reply(200, final("According to the Terraria wiki, the Eye of Cthulhu has two phases, so dodge its charges and then fight its servants."))
+            return self.reply(200, final("From memory: just shoot it a lot."))
         if body.get("tool_choice") == "none":
             return self.reply(200, final("Best effort from what I found."))
         if last["role"] == "user":

@@ -85,13 +85,14 @@ FILO_PROVIDER=nim NVIDIA_API_KEY=nvapi-test "$GODOT" --path "$ROOT/app" -- \
   --helper-cmd "$PY" --helper-args "$ROOT/scripts/fake_helper.py --wake --question 'Who is Ganon in Zelda?'" \
   --mute --no-greet --quit-after 35 --verbose > "$OUT/e2e_wiki.log" 2>&1
 expect "$OUT/e2e_wiki.log" "LLM: NVIDIA NIM" "NIM provider selected"
-expect "$OUT/e2e_wiki.log" "Research failed" "the research path failed (410) instead of answering"
+expect "$OUT/e2e_wiki.log" "route: tool loop failed" "the research path failed (410) instead of answering (log line renamed with the routing work)"
 expect "$OUT/e2e_wiki.log" "using the standard fallback" "...and handed over to the standard fallback"
 expect "$OUT/e2e_wiki.log" "asking Wikipedia" "low notes confidence triggered Wikipedia"
 expect "$OUT/e2e_wiki.log" "Wikipedia: 2 page(s): Ganon, The Legend of Zelda" "two summaries fetched, disambiguation skipped"
 expect "$OUT/e2e_wiki.log" "ANSWER (" "NIM answered with the Wikipedia passages"
 expect "$OUT/e2e_wiki.log" "SOURCE: Ganon — https://en.wikipedia.org/wiki/Ganon" "Wikipedia source shown"
-expect "$OUT/mock_api.log" "mock_wiki: search 'Sekiro: Shadows Die Twice Who is Ganon in Zelda?' ua='Filo/0.1" "search biased with the game name and a proper User-Agent"
+# the game is now taken from the question ("in Zelda"), not blindly from the loaded Sekiro profile
+expect "$OUT/mock_api.log" "mock_wiki: search 'Zelda Who is Ganon in Zelda?' ua='Filo/0.1" "search biased with the game named in the question and a proper User-Agent"
 no_script_errors "$OUT/e2e_wiki.log"
 
 KOKORO_PY="$ROOT/tts/venv/bin/python3"
@@ -129,7 +130,7 @@ FILO_PROVIDER=nim NVIDIA_API_KEY=nvapi-test "$GODOT" --path "$ROOT/app" -- \
   --mute --no-greet --quit-after 40 --verbose > "$OUT/e2e_research.log" 2>&1
 expect "$OUT/e2e_research.log" "Research (tool-calling) chain: dead-model → live-model" "model chain loaded from config"
 expect "$OUT/e2e_research.log" "primary model 'dead-model' is not responding" "start-up warm-up found the dead model and marked it down"
-expect "$OUT/e2e_research.log" "researching with tools" "low notes confidence entered the tool loop"
+expect "$OUT/e2e_research.log" "route: tool loop" "no confident local answer entered the tool loop (log line renamed with the routing work)"
 expect "$OUT/e2e_research.log" "Research done: model=live-model rounds=3 tools=2" "wiki_search -> wiki_page -> answer on the live model"
 expect "$OUT/e2e_research.log" "ANSWER (live-model, web): According to the Dark Souls wiki, you get the Lordvessel from Frampt" "spoken answer came from the fetched page"
 expect "$OUT/e2e_research.log" "SOURCE: Lordvessel — http://127.0.0.1:8787/wiki/Lordvessel" "the page that was read is cited"
@@ -139,6 +140,24 @@ if grep -q "SECRET REASONING\|<think>\|https://darksouls" "$OUT/e2e_research.log
   if grep -E "ANSWER|Filo\] SOURCE" "$OUT/e2e_research.log" | grep -q "SECRET REASONING\|<think>\|https://darksouls"; then echo "  FAIL: reasoning text or a URL reached the spoken answer"; FAILED=1; else echo "  ok: reasoning and URLs stayed out of the answer"; fi
 else echo "  ok: reasoning and URLs stayed out of the answer"; fi
 no_script_errors "$OUT/e2e_research.log"
+
+echo "== 2f/4 the reported bug: an unlisted-in-notes game (Terraria) must reach the tool loop even when the model will not call tools itself"
+cat > "$OUT/terraria_config.json" <<JSON
+{"research": {"models": [{"id": "lazy-model"}], "claude_fallback": false, "warmup_probe": false,
+  "wikis": {"terraria": "http://127.0.0.1:8787"}}}
+JSON
+FILO_PROVIDER=nim NVIDIA_API_KEY=nvapi-test "$GODOT" --path "$ROOT/app" -- \
+  --config "$OUT/terraria_config.json" --nim-base http://127.0.0.1:8787/v1 --port 47894 --tts-provider system \
+  --helper-cmd "$PY" --helper-args "$ROOT/scripts/fake_helper.py --wake --question 'How do I beat the Eye of Cthulhu in Terraria?'" \
+  --mute --no-greet --quit-after 40 --verbose > "$OUT/e2e_terraria.log" 2>&1
+expect "$OUT/e2e_terraria.log" "route: tool loop" "the Terraria question was routed to the tool loop (not answered from the loaded Sekiro notes)"
+expect "$OUT/e2e_terraria.log" "game='Terraria'" "the game was detected from the question"
+expect "$OUT/e2e_terraria.log" "rejected tool_choice=required" "a model that rejects tool_choice=required is handled"
+expect "$OUT/e2e_terraria.log" "answered without a tool call" "a model that answers from memory is overruled"
+expect "$OUT/e2e_terraria.log" "Tool call: wiki_search({\"game\":\"Terraria\",\"query\":\"Eye of Cthulhu\"})" "the search ran anyway, with a clean query"
+expect "$OUT/mock_api.log" "mock_gamewiki: query 'Eye of Cthulhu'" "the game's wiki API was queried"
+expect "$OUT/e2e_terraria.log" "ANSWER (lazy-model, web): According to the Terraria wiki" "the spoken answer is grounded in the tool result, not the model's memory"
+no_script_errors "$OUT/e2e_terraria.log"
 
 echo "== 3/4 showcase captures"
 "$GODOT" --path "$ROOT/app" -- --showcase --capture-dir "$OUT/captures" --mute --no-helper --tts-provider system --quit-after 70 > "$OUT/showcase.log" 2>&1

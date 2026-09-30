@@ -566,6 +566,9 @@ func _ask(question: String) -> void:
 		FiloLog.warn("ANSWER FAILED: " + str(result.get("error", "")))
 		_show_error(str(result.get("error", "Something went wrong.")))
 		return
+	if str(result.get("route", "")) == "command":
+		_handle_command(result)
+		return
 	FiloLog.info("ANSWER (%s%s): %s" % [str(result.get("model", "")), ", web" if result.get("used_web", false) else "", result.text])
 	for s in result.sources:
 		FiloLog.info("SOURCE: %s — %s" % [s.title, s.url])
@@ -574,6 +577,33 @@ func _ask(question: String) -> void:
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))
 	_speak(result.spoken, "answer")
+
+
+## Voice commands recognised by the pipeline (no model, no tools): stop, mute, unmute, repeat.
+func _handle_command(result: Dictionary) -> void:
+	var cmd := str(result.get("command", ""))
+	FiloLog.info("COMMAND: " + cmd)
+	match cmd:
+		"stop":
+			speaker.stop()
+			bubble.show_info("Okay.")
+			_set_state(AppState.IDLE)
+		"mute", "unmute":
+			var on := cmd == "mute"
+			speaker.set_muted(on)
+			bubble.sound_button.set_muted(on)
+			bubble.show_info(str(result.text))
+			_set_state(AppState.IDLE)
+			if not on:
+				_speak(str(result.spoken), "info")
+		"repeat":
+			_set_state(AppState.ANSWERING)
+			bubble.show_answer("", str(result.text), [], false)
+			_speak(str(result.spoken), "answer")
+		_:
+			_set_state(AppState.IDLE)
+	if _scripted and cmd != "repeat":
+		_finish_scripted()
 
 
 ## After an answer: a short spoken "anything else?" then open listening.

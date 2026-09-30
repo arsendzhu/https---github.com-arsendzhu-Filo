@@ -35,7 +35,14 @@ const DEFAULTS := {
 		"search_provider": "duckduckgo",
 		"max_redirects": 3,
 		"max_fetch_bytes": 1500000,
+		"force_first_tool": "required",
+		# One line per game is enough: "game name": "https://wiki-host" (api.php is assumed). Use the long
+		# form {"base_url", "api_path", "name", "aliases"} for wikis whose API lives elsewhere. Games
+		# that are not listed are discovered at question time: web_search -> a wiki that answers api.php.
 		"wikis": {
+			"terraria": "https://terraria.wiki.gg",
+			"minecraft": "https://minecraft.wiki",
+			"stardew valley": {"aliases": ["stardew valley", "stardew"], "base_url": "https://stardewvalleywiki.com", "api_path": "/mediawiki/api.php", "name": "Stardew Valley wiki"},
 			"dark souls": {"aliases": ["dark souls", "darksouls"], "base_url": "https://darksouls.fandom.com", "api_path": "/api.php", "name": "Dark Souls wiki"},
 			"dark souls 2": {"aliases": ["dark souls 2", "dark souls ii", "darksouls2"], "base_url": "https://darksouls2.fandom.com", "api_path": "/api.php", "name": "Dark Souls 2 wiki"},
 			"dark souls 3": {"aliases": ["dark souls 3", "dark souls iii", "darksouls3"], "base_url": "https://darksouls3.fandom.com", "api_path": "/api.php", "name": "Dark Souls 3 wiki"},
@@ -84,6 +91,7 @@ const DEFAULTS := {
 		"farewell_phrases": ["Bye!", "See you!", "Good luck out there!", "Later!"],
 	},
 	"screen_reading": {"enabled": false},
+	"session": {"idle_reset_seconds": 900},
 	"verbose": false,
 }
 

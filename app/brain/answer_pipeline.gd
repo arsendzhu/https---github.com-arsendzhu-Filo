@@ -14,9 +14,18 @@ var wikipedia: WikipediaClient
 var web_tools: WebTools
 var research: ResearchAgent
 var provider := "none"                 # anthropic | nim | none
-var history: Array = []                # [{q, a}], most recent last
-var max_history := 4
+var session := SessionMemory.new()     # current game, recent turns, last topic (follow-ups)
+var history: Array:                    # [{q, a, topic}], most recent last
+	get:
+		return session.turns
+var max_history: int:
+	get:
+		return session.max_turns
+	set(v):
+		session.max_turns = v
 var session_context: Dictionary = {}   # Phase 1+: last_area, last_boss, ...
+var pattern_game_local_confidence := 0.8   # notes must be this sure to answer about a game we only guessed from the wording
+var _req_seq := 0
 
 
 func setup(config: FiloConfig, game_profile: GameProfile) -> void:
@@ -48,6 +57,8 @@ func setup(config: FiloConfig, game_profile: GameProfile) -> void:
 	research.setup(cfg, nim, claude, wikipedia, web_tools)
 	provider = cfg.provider()
 	max_history = maxi(0, int(cfg.get_value("behavior.conversation_turns", 4)))
+	session.idle_reset_seconds = float(cfg.get_value("session.idle_reset_seconds", 900))
+	pattern_game_local_confidence = float(cfg.get_value("research.pattern_game_local_confidence", 0.8))
 	set_profile(game_profile)
 	if research.is_available():
 		FiloLog.info("Research (tool-calling) chain: " + research.chain_label())
@@ -63,7 +74,7 @@ func set_profile(game_profile: GameProfile) -> void:
 
 
 func clear_history() -> void:
-	history.clear()
+	session.clear()
 
 
 func llm_label() -> String:
@@ -105,28 +116,82 @@ func web_label() -> String:
 			return "off"
 
 
+## Routes one question. Every decision is logged as "[req N] route: ..." so a missing lookup is
+## always explainable from the log: command / small talk (no tools), local notes (confident),
+## tool loop (research agent) or the plain fallback.
 func ask(question: String) -> Dictionary:
+	_req_seq += 1
+	var tag := "req %d" % _req_seq
+	var kind := QueryRouter.classify(question)
+	if kind == "command":
+		var cmd := QueryRouter.command_for(question)
+		FiloLog.info("[%s] route: command '%s' - tools skipped" % [tag, cmd])
+		return _command_result(cmd)
+	if kind == "smalltalk":
+		FiloLog.info("[%s] route: small talk - tools skipped" % tag)
+		return await _smalltalk(question, tag)
+
 	var threshold: float = float(cfg.get_value("web_search.confidence_threshold", 0.45))
 	var r := retriever.search(question, 4)
 	var passages: Array = r.results.duplicate()
-	var low_confidence: bool = passages.is_empty() or r.confidence < threshold
-	if low_confidence and research != null and research.is_available():
-		FiloLog.info("Notes confidence %.2f is below %.2f — researching with tools" % [r.confidence, threshold])
-		var rr: Dictionary = await research.answer(user_content(question, passages), profile.name if profile else "")
+	var confidence: float = r.confidence
+
+	# Which game is this about? A game we know (wiki table / profile) beats the loaded profile.
+	var games: Array = research.known_games() if research != null else []
+	var profile_name := profile.name if profile else ""
+	var det := QueryRouter.detect_game(question, games)
+	var game_name := session.game if session.game != "" else profile_name
+	var mismatch := ""
+	if det.name != "":
+		if det.source == "known":
+			game_name = det.name
+			if profile_name != "" and not QueryRouter.same_game(det.name, profile_name, games):
+				mismatch = "the question is about %s, the loaded notes are for %s" % [det.name, profile_name]
+		elif profile_name == "" or not QueryRouter.same_game(det.name, profile_name, games):
+			# only guessed from the wording ("... in Hollow Knight"): trust it unless the notes are very sure
+			game_name = det.name
+			if confidence < pattern_game_local_confidence:
+				mismatch = "the wording suggests a different game (%s) and the notes are not sure enough" % det.name
+	var reset := session.begin_question(game_name if det.name != "" else "")
+	if reset != "":
+		FiloLog.info("[%s] session memory cleared: %s" % [tag, reset])
+	if game_name == "":
+		game_name = session.game if session.game != "" else profile_name
+	if mismatch == "" and profile_name != "" and not QueryRouter.same_game(game_name, profile_name, games):
+		# a follow-up inside a session about another game: the loaded notes are for the profile's game only
+		mismatch = "the current game is %s, the loaded notes are for %s" % [game_name, profile_name]
+	if mismatch != "":
+		FiloLog.info("[%s] notes ignored: %s" % [tag, mismatch])
+		passages = []
+		confidence = 0.0
+	var same_game_topic := session.last_topic() if (det.name == "" or QueryRouter.same_game(det.name, session.game)) else ""
+	var rw := QueryRouter.rewrite(question, game_name, same_game_topic)
+	FiloLog.info("[%s] game='%s' (%s) query wiki='%s' web='%s'%s" % [tag, game_name, det.source if det.source != "" else "session/profile", rw.wiki, rw.web, " (follow-up)" if rw.followup else ""])
+
+	var local_ok := not passages.is_empty() and confidence >= threshold
+	var low_confidence := not local_ok
+	if local_ok:
+		FiloLog.info("[%s] route: local notes (confidence %.2f >= %.2f) - tools skipped" % [tag, confidence, threshold])
+	elif research == null or not research.is_available():
+		FiloLog.info("[%s] route: standard fallback - the tool loop is unavailable (%s)" % [tag, _research_unavailable_reason()])
+	else:
+		FiloLog.info("[%s] route: tool loop - %s" % [tag, mismatch if mismatch != "" else "no confident local answer (confidence %.2f < %.2f)" % [confidence, threshold]])
+		var hints := {"force_tool": true, "wiki_query": rw.wiki, "web_query": rw.web, "game": game_name, "tag": tag}
+		var rr: Dictionary = await research.answer(user_content(question, passages, rw, game_name), game_name, hints)
 		if rr.ok:
-			_remember(question, rr.text)
+			_remember(question, rr.text, rw.topic)
 			return {
 				"ok": true, "text": rr.text, "spoken": rr.text, "sources": rr.sources, "used_web": true,
-				"confidence": r.confidence, "model": rr.model, "provider": "research",
+				"confidence": confidence, "model": rr.model, "provider": "research", "route": "tool_loop", "game": game_name,
 				"timing": {"total_ms": rr.total_ms, "first_response_ms": rr.first_response_ms, "model_ms": rr.model_ms, "tool_ms": rr.tool_ms, "rounds": rr.rounds, "tool_calls": rr.tool_calls},
 			}
-		FiloLog.warn("Research failed (%s) — using the standard fallback" % str(rr.error))
+		FiloLog.warn("[%s] route: tool loop failed (%s) - using the standard fallback" % [tag, str(rr.error)])
 	var web := web_provider()
 	var use_claude_web := web == "anthropic" and low_confidence
 	var wiki_used := false
 	if web == "wikipedia" and low_confidence:
-		FiloLog.info("Notes confidence %.2f is below %.2f — asking Wikipedia" % [r.confidence, threshold])
-		var w: Dictionary = await wikipedia.search_and_summarize(question, profile.name if profile else "")
+		FiloLog.info("[%s] Notes confidence %.2f is below %.2f - asking Wikipedia" % [tag, confidence, threshold])
+		var w: Dictionary = await wikipedia.search_and_summarize(question, game_name)
 		if w.ok:
 			var titles := PackedStringArray()
 			for e in w.results:
@@ -143,11 +208,11 @@ func ask(question: String) -> Dictionary:
 		fallback_note = "Wikipedia"
 	elif low_confidence and web != "off":
 		fallback_note = web + " (nothing found)"
-	FiloLog.info("Retrieval: %d note passages, confidence %.2f, web fallback %s" % [r.results.size(), r.confidence, fallback_note])
+	FiloLog.info("Retrieval: %d note passages, confidence %.2f, web fallback %s" % [passages.size(), confidence, fallback_note])
 	if provider == "none":
-		return _kb_only(passages, r.confidence)
+		return _kb_only(passages, confidence)
 	var sys := system_prompt(use_claude_web, wiki_used)
-	var user := user_content(question, passages)
+	var user := user_content(question, passages, rw, game_name)
 	var resp: Dictionary
 	if provider == "nim":
 		resp = await nim.ask(sys, user)
@@ -157,7 +222,7 @@ func ask(question: String) -> Dictionary:
 			tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": int(cfg.get_value("web_search.max_uses", 2))})
 		resp = await claude.ask(sys, user, tools)
 	if not resp.ok:
-		return {"ok": false, "error": resp.error, "used_web": use_claude_web or wiki_used, "confidence": r.confidence}
+		return {"ok": false, "error": resp.error, "used_web": use_claude_web or wiki_used, "confidence": confidence}
 	var split := split_sources(resp.text)
 	var sources := []
 	for i in split.indices:
@@ -174,25 +239,83 @@ func ask(question: String) -> Dictionary:
 			if str(p.chunk.get("kind", "kb")) == "web":
 				_add_source(sources, {"kind": "web", "title": p.chunk.title, "url": p.chunk.source})
 	var clean := clean_for_speech(split.text)
-	_remember(question, clean)
+	_remember(question, clean, rw.topic)
 	return {
 		"ok": true,
 		"text": clean,
 		"spoken": clean,
 		"sources": sources,
 		"used_web": use_claude_web or wiki_used,
-		"confidence": r.confidence,
+		"confidence": confidence,
 		"model": resp.model,
 		"provider": provider,
+		"route": "local" if local_ok else "fallback",
+		"game": game_name,
 	}
 
 
-func _remember(question: String, answer: String) -> void:
-	if max_history <= 0:
-		return
-	history.append({"q": question, "a": answer})
-	while history.size() > max_history:
-		history.pop_front()
+func _remember(question: String, answer: String, topic: String = "") -> void:
+	session.note_turn(question, answer, topic)
+
+
+func _research_unavailable_reason() -> String:
+	if research == null:
+		return "no research agent"
+	if not bool(cfg.get_value("research.enabled", true)):
+		return "research.enabled is false"
+	if nim == null or not nim.has_key():
+		return "no NVIDIA_API_KEY"
+	return "no research models configured"
+
+
+## "stop" / "mute" / "unmute" / "repeat": handled by the app, no model, no tools.
+func _command_result(cmd: String) -> Dictionary:
+	var text := ""
+	match cmd:
+		"repeat":
+			text = str(session.turns[-1].a) if not session.turns.is_empty() else "There's nothing to repeat yet."
+		"mute":
+			text = "Okay, muted."
+		"unmute":
+			text = "Voice is back on."
+	return {"ok": true, "text": text, "spoken": text if cmd == "unmute" or cmd == "repeat" else "", "sources": [], "used_web": false,
+		"confidence": 1.0, "model": "local", "provider": "local", "route": "command", "command": cmd}
+
+
+## Small talk gets one short model reply (never tools), or a canned one when no model answers.
+func _smalltalk(question: String, tag: String) -> Dictionary:
+	var text := ""
+	var model := "canned"
+	if provider != "none":
+		var sys := "You are Filo, a friendly little in-game companion who looks up game facts. The player is making small talk. Reply in one short, warm spoken sentence. Do not look anything up and do not use markdown."
+		var resp: Dictionary
+		if provider == "nim":
+			resp = await nim.ask(sys, question)
+		else:
+			resp = await claude.ask(sys, question, [])
+		if resp.ok:
+			text = clean_for_speech(split_sources(resp.text).text)
+			model = str(resp.get("model", ""))
+		else:
+			FiloLog.warn("[%s] small talk model failed (%s) - canned reply" % [tag, str(resp.error)])
+	if text == "":
+		text = canned_smalltalk(question)
+	return {"ok": true, "text": text, "spoken": text, "sources": [], "used_web": false, "confidence": 1.0, "model": model, "provider": provider, "route": "smalltalk"}
+
+
+static func canned_smalltalk(question: String) -> String:
+	var n := QueryRouter.normalize(question)
+	if n.contains("thank") or n in ["nice", "great", "cool", "awesome", "perfect", "cheers"]:
+		return "Anytime!"
+	if n.contains("bye") or n.contains("night") or n.contains("see you") or n == "later":
+		return "See you out there!"
+	if n.contains("who are you") or n.contains("what are you") or n.contains("your name") or n.contains("what can you do") or n.contains("what do you do"):
+		return "I'm Filo, a little wiki guide for any game. Ask me about bosses, items or quests."
+	if n.contains("how are you") or n.contains("how's it going") or n.contains("how is it going"):
+		return "Doing great, thanks! What are you playing?"
+	if n.contains("hear me") or n.contains("test") or n.contains("there") or n.contains("listening"):
+		return "Loud and clear!"
+	return "Hey! Ask me anything about your game."
 
 
 func _kb_only(passages: Array, confidence: float) -> Dictionary:
@@ -238,12 +361,15 @@ func system_prompt(use_web: bool, wiki_present: bool = false) -> String:
 	return "\n".join(lines)
 
 
-func user_content(question: String, passages: Array) -> String:
-	var parts := ["Game: " + (profile.name if profile else "unknown")]
-	if session_context.is_empty():
+func user_content(question: String, passages: Array, rewrite: Dictionary = {}, game_name: String = "") -> String:
+	var game := game_name if game_name != "" else (profile.name if profile else "unknown")
+	var parts := ["Game: " + game]
+	var ctx := session.context()
+	ctx.merge(session_context, true)
+	if ctx.is_empty():
 		parts.append("Session context: none")
 	else:
-		parts.append("Session context: " + JSON.stringify(session_context))
+		parts.append("Session context: " + JSON.stringify(ctx))
 	if not history.is_empty():
 		var turns := PackedStringArray()
 		for h in history:
@@ -257,6 +383,8 @@ func user_content(question: String, passages: Array) -> String:
 			var ch: Dictionary = passages[i].chunk
 			var label := "Wikipedia: " if str(ch.get("kind", "kb")) == "web" else ""
 			parts.append("[%d] %s%s — %s\n%s" % [i + 1, label, ch.title, ch.source, ch.text])
+	if not rewrite.is_empty() and str(rewrite.get("wiki", "")) != "":
+		parts.append("Suggested wiki search: \"%s\"%s" % [rewrite.wiki, " (a follow-up about: %s)" % session.last_topic() if rewrite.get("followup", false) else ""])
 	parts.append("Question: " + question.strip_edges())
 	return "\n\n".join(parts)
 
