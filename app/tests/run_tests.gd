@@ -30,6 +30,7 @@ func _init() -> void:
 	await test_unknown_game_still_uses_tools()
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
+	test_settings_persist_roundtrip()
 	await _test_prefetch()
 	await test_golden_questions_eval()
 	await _test_speaker_continuation()
@@ -1457,3 +1458,53 @@ func test_golden_questions_eval() -> void:
 		check(int(per_game.get(g, 0)) >= 6, "the golden set has at least 6 questions for %s (%d)" % [g, int(per_game.get(g, 0))])
 	check(bench == 8, "8 questions are marked for the live benchmark (%d)" % bench)
 	print("golden set: %d/%d routed as expected, %d/%d answers contain their key terms" % [routes_ok, total, terms_ok, total])
+
+
+# ------------------------------------------------------------------------- settings (Tier 1)
+
+func test_settings_persist_roundtrip() -> void:
+	var file := ProjectSettings.globalize_path("user://filo_test_settings.json")
+	for suffix in ["", ".corrupt", ".tmp"]:
+		DirAccess.remove_absolute(file + suffix)
+	var s := UserSettings.load_from(file)
+	check(s.values == UserSettings.defaults() and s.last_problems.is_empty(), "a missing settings file gives the defaults without complaint")
+	for k in UserSettings.SCHEMA:
+		check(UserSettings.validate(k, UserSettings.SCHEMA[k].default).ok, "the default of '%s' passes its own validation" % k)
+
+	# round trip: change a value of every type, save, load into a fresh object
+	check(s.set_value("volume", 35) and s.set_value("spoiler_level", "nudge") and s.set_value("mic_muted", true) and s.set_value("voice_muted", true), "valid values are accepted")
+	check(s.set_value("hotkey", {"key": "F8", "modifiers": ["Control", "shift", "bogus"]}) and s.set_value("overlay_offset", [-40, 12.5]) and s.set_value("overlay_opacity", 0.7) and s.set_value("followup_mode", "text") and s.set_value("game", "sekiro") and s.set_value("mic_device", "MacBook Pro Microphone"), "hotkeys, vectors, floats, enums and strings too")
+	check(s.save(), "the file is written")
+	check(FileAccess.file_exists(file) and not FileAccess.file_exists(file + ".tmp"), "the write is atomic: no temporary file is left behind")
+	var t := UserSettings.load_from(file)
+	check(t.values == s.values and t.last_problems.is_empty(), "everything round-trips through the file exactly")
+	check(t.get_value("hotkey") == {"key": "f8", "modifiers": ["control", "shift"]} and t.get_value("volume") == 35 and t.get_value("mic_muted") == true and t.get_value("overlay_offset") == [-40.0, 12.5], "and is normalised (hotkey lower-cased, unknown modifier dropped): " + str(t.get_value("hotkey")))
+
+	# validation
+	check(not s.set_value("volume", "loud") and not s.set_value("spoiler_level", "everything") and not s.set_value("nope", 1) and not s.set_value("mic_muted", "yes") and not s.set_value("overlay_offset", [1]), "wrong types, unknown enum values and unknown keys are refused")
+	check(s.get_value("volume") == 35, "a refused value leaves the old one in place")
+	check(s.set_value("volume", 500) and s.get_value("volume") == 100 and s.set_value("overlay_opacity", 0.0) and is_equal_approx(s.get_value("overlay_opacity"), 0.2), "numbers are clamped to their range")
+
+	# a hand-edited file with a bad value keeps the good ones and reports the bad one
+	var f := FileAccess.open(file, FileAccess.WRITE)
+	f.store_string('{"volume": 20, "spoiler_level": "loud", "mic_muted": "maybe", "future_key": 1, "game": "dark_souls"}')
+	f.close()
+	var u := UserSettings.load_from(file)
+	check(u.get_value("volume") == 20 and u.get_value("game") == "dark_souls" and u.get_value("spoiler_level") == "hint" and u.get_value("mic_muted") == false and u.last_problems.size() == 2, "bad values fall back to their defaults, good ones are kept: " + str(u.last_problems))
+
+	# a corrupt file: defaults, the broken file is kept aside, Filo starts
+	f = FileAccess.open(file, FileAccess.WRITE)
+	f.store_string("{this is not json")
+	f.close()
+	var c := UserSettings.load_from(file)
+	check(c.values == UserSettings.defaults() and c.last_problems == ["corrupt file"], "a corrupt file gives the defaults")
+	check(FileAccess.file_exists(file + ".corrupt") and not FileAccess.file_exists(file), "...and is kept as .corrupt instead of being overwritten or crashing")
+	check(c.save() and UserSettings.load_from(file).values == UserSettings.defaults(), "the next save writes a good file again")
+
+	# settings override config.json
+	var cfg := FiloConfig.new()
+	cfg.data = FiloConfig.DEFAULTS.duplicate(true)
+	s.apply_to(cfg)
+	check(cfg.get_value("tts.volume") == 100 and cfg.get_value("hotkey.key") == "f8" and cfg.get_value("default_profile") == "sekiro" and cfg.get_value("settings.spoiler_level") == "nudge", "settings are applied over the config")
+	for suffix in ["", ".corrupt", ".tmp"]:
+		DirAccess.remove_absolute(file + suffix)

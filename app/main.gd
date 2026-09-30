@@ -30,6 +30,7 @@ var pipeline: AnswerPipeline
 var speaker: Speaker
 var showcase: Showcase
 var win_info: Dictionary = {}
+var settings: UserSettings            # what the user changed while using Filo (settings.json, validated)
 
 var app_state: int = AppState.ASLEEP
 var idle_timer: Timer
@@ -72,6 +73,9 @@ func _ready() -> void:
 	args = FiloArgs.parse(OS.get_cmdline_user_args())
 	cfg = FiloConfig.load_default(args)
 	FiloLog.verbose = bool(cfg.get_value("verbose", false))
+	var settings_path := OS.get_environment("FILO_SETTINGS_PATH")     # tests point this at a temp file
+	settings = UserSettings.load_from(settings_path if settings_path != "" else cfg.resolve_path("settings.json"))
+	settings.apply_to(cfg)
 	FiloLog.info("Filo Phase 0 starting (Godot %s)" % Engine.get_version_info().string)
 	FiloLog.info("Config: " + (cfg.source_path if cfg.source_path != "" else "defaults (no config.json found at " + FiloConfig.project_root() + ")"))
 	if cfg.dotenv_path != "":
@@ -93,7 +97,14 @@ func _ready() -> void:
 	speaker.finished.connect(_on_speaker_finished)
 	speaker.cancelled.connect(_on_speaker_cancelled)
 	speaker.mouth_level.connect(func(v: float) -> void: mascot.animator.set_mouth_level(v))
-	controls.sound_button.set_muted(not speaker.enabled)
+	if settings.get_value("voice_muted"):
+		speaker.set_muted(true)
+	controls.sound_button.set_muted(not speaker.enabled or speaker.user_muted)
+	_followup_mode = str(settings.get_value("followup_mode"))
+	controls.mode_button.set_mode(_followup_mode)
+	if settings.get_value("mic_muted"):
+		mic_muted = true
+		controls.mic_button.set_muted(true)
 	controls.sound_button.pressed.connect(_on_sound_button_pressed)
 	controls.mode_button.pressed.connect(_on_mode_button_pressed)
 	controls.mic_button.pressed.connect(_on_mic_button_pressed)
@@ -298,6 +309,16 @@ func _send_vocabulary() -> void:
 		FiloLog.debug("Sent %d vocabulary hints for '%s'" % [words.size(), _current_game_name()])
 
 
+## Persist one user setting (validated; a bad value is refused). Never throws.
+func _save_setting(key: String, value) -> void:
+	if settings == null:
+		return
+	if settings.get_value(key) == value:
+		return
+	if settings.set_value(key, value):
+		settings.save()
+
+
 func _mute_hotkey_enabled() -> bool:
 	return str(cfg.get_value("hotkey_mute.key", "")).strip_edges() != ""
 
@@ -366,6 +387,7 @@ func _on_apps(list: Array) -> void:
 			if p.matches_app(n):
 				if profile.id != pid:
 					FiloLog.info("Detected running game '%s' -> profile %s" % [n, pid])
+					_save_setting("game", pid)
 					_load_profile(pid)
 					pipeline.set_profile(profile)
 					if app_state != AppState.ASLEEP:
@@ -835,9 +857,9 @@ func _sleep() -> void:
 	_answer_token += 1
 	_pending_final = false
 	_followup = false
-	_followup_mode = "voice"
+	_followup_mode = str(settings.get_value("followup_mode")) if settings != null else "voice"
 	_had_first_answer = false
-	controls.mode_button.set_mode("voice")
+	controls.mode_button.set_mode(_followup_mode)
 	_speech_kind = ""
 	if bridge:
 		bridge.send({"cmd": "listen_stop"})
@@ -934,6 +956,7 @@ func _notice(message: String) -> void:
 func _on_sound_button_pressed() -> void:
 	var now_muted := not speaker.user_muted
 	speaker.set_muted(now_muted)
+	_save_setting("voice_muted", now_muted)
 	controls.sound_button.set_muted(now_muted)
 	FiloLog.info("Sound " + ("muted" if now_muted else "unmuted"))
 	if now_muted and speaker.is_speaking():
@@ -952,6 +975,7 @@ func _on_sound_button_pressed() -> void:
 ## switch takes effect immediately instead of waiting for the next question.
 func _on_mode_button_pressed() -> void:
 	_followup_mode = "text" if _followup_mode == "voice" else "voice"
+	_save_setting("followup_mode", _followup_mode)
 	controls.mode_button.set_mode(_followup_mode)
 	FiloLog.info("Follow-up mode: " + _followup_mode)
 	if _followup and app_state == AppState.LISTENING:
@@ -975,6 +999,7 @@ func _on_mic_button_pressed() -> void:
 
 func set_mic_muted(muted: bool, source: String) -> void:
 	mic_muted = muted
+	_save_setting("mic_muted", muted)
 	mic_mute_confirmed = false
 	controls.mic_button.set_muted(muted)
 	FiloLog.info("Microphone %s (%s)" % ["muted" if muted else "unmuted", source])

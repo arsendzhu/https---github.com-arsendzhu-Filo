@@ -17,6 +17,7 @@ OUT="${FILO_TEST_OUT:-$(mktemp -d /tmp/filo-test.XXXXXX)}"
 mkdir -p "$OUT"
 PY="$(command -v python3)"
 FAILED=0
+export FILO_SETTINGS_PATH="$OUT/settings.json"     # no test may touch the real settings.json
 echo "Test output: $OUT"
 
 expect() {  # expect <logfile> <pattern> <description>
