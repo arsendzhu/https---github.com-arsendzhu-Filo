@@ -267,6 +267,10 @@ func _process(delta: float) -> void:
 		_mute_deadline = 0.0
 		if bridge != null and helper_connected and not mic_mute_confirmed:
 			FiloLog.warn("The helper did not confirm the microphone %s request" % ("mute" if mic_muted else "unmute"))
+			var failure := FailureUX.classify("", "helper_unconfirmed")
+			_error_until = Time.get_ticks_msec() / 1000.0 + 8.0
+			_notice(str(failure.visual))
+			_speak_failure(failure)
 
 
 # ------------------------------------------------------------------ helper

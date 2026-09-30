@@ -54,6 +54,7 @@ func _run() -> void:
 	await _test_history_captions_panic()
 	await _test_onboarding()
 	test_keyboard_only_controls()
+	_test_unconfirmed_mute_is_reported()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -476,3 +477,17 @@ func test_keyboard_only_controls() -> void:
 	main._on_typed_submitted("/type")
 	check(main.input_panel.is_open(), "/type opens the question box like the type button")
 	main.input_panel.close()
+
+
+## An old helper build ignores set_mute: the button must not silently pretend the microphone is off.
+func _test_unconfirmed_mute_is_reported() -> void:
+	main._failure_spoken.clear()
+	main.speaker.last_text = ""
+	main.app_state = main.AppState.IDLE
+	main.mic_mute_confirmed = false
+	main._mute_deadline = 0.001                     # the acknowledgement never came
+	main._process(0.016)
+	check(main.bubble.body.text.contains("did not confirm") and main.bubble.body.text.contains("build_helper"), "an unconfirmed mute is shown with what to do: '%s'" % main.bubble.body.text.left(80))
+	check(main.speaker.last_text.contains("isn't confirmed"), "...and spoken: '%s'" % main.speaker.last_text)
+	main.speaker.stop()
+	main._error_until = 0.0

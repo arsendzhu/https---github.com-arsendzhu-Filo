@@ -45,6 +45,10 @@ const KINDS := {
 		"spoken": "I couldn't find that in the wiki.",
 		"visual": "I couldn't find that in the wiki. Try different words, or ask about a specific boss, item or place.",
 	},
+	"helper_unconfirmed": {
+		"spoken": "The microphone mute isn't confirmed. My helper may be out of date.",
+		"visual": "The hotkey helper did not confirm the microphone change, so it may be an old build and the microphone might still be on. Run scripts/build_helper.sh and restart Filo.",
+	},
 	"muted": {
 		"spoken": "The microphone is muted.",
 		"visual": "The microphone is muted. Click the mic button or press the mute hotkey to unmute, or tap the hotkey to type.",
@@ -74,6 +78,8 @@ static func _kind_of(msg: String, code: String) -> String:
 			return "recognition"
 		"muted":
 			return "muted"
+		"helper_unconfirmed":
+			return "helper_unconfirmed"
 	if msg.contains("internet") or msg.contains("can't reach") or msg.contains("could not connect") or msg.contains("network error") or msg.contains("no internet"):
 		return "no_internet"
 	if msg.contains("rate-limit") or msg.contains("rate limit") or msg.contains("429") or msg.contains("overloaded") or msg.contains("budget"):
