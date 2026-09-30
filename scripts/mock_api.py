@@ -12,7 +12,7 @@ MOCK_MODE=ok|web|refusal|overloaded|badkey (default ok)."""
 import json
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 MODE = os.environ.get("MOCK_MODE", "ok")
@@ -25,10 +25,54 @@ WIKI_PAGES = {
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"          # keep-alive, like the real endpoint (every reply carries Content-Length or is chunked)
+    want_stream = False
+
     def log_message(self, *a):
         pass
 
+    def stream_reply(self, obj):
+        """The same chat completion as server-sent events (chunked), the way NIM streams: role delta, reasoning
+        deltas (must be ignored), content or tool-call fragments, finish_reason, [DONE]."""
+        choice = obj["choices"][0]
+        msg = choice["message"]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def chunk(text):
+            b = text.encode()
+            self.wfile.write(b"%x\r\n" % len(b) + b + b"\r\n")
+            self.wfile.flush()
+
+        def ev(delta, finish=None):
+            chunk("data: " + json.dumps({"id": "chatcmpl-mock", "object": "chat.completion.chunk", "model": obj.get("model"),
+                                         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}) + "\n\n")
+        ev({"role": "assistant", "content": ""})
+        if msg.get("reasoning_content"):
+            ev({"reasoning_content": msg["reasoning_content"]})
+        if msg.get("tool_calls"):
+            for i, tc in enumerate(msg["tool_calls"]):
+                args = tc["function"]["arguments"]
+                half = len(args) // 2
+                ev({"tool_calls": [{"index": i, "id": tc["id"], "type": "function", "function": {"name": tc["function"]["name"], "arguments": ""}}]})
+                ev({"tool_calls": [{"index": i, "function": {"arguments": args[:half]}}]})
+                ev({"tool_calls": [{"index": i, "function": {"arguments": args[half:]}}]})
+        else:
+            text = msg.get("content") or ""
+            third = max(1, len(text) // 3)
+            for part in (text[:third], text[third:2 * third], text[2 * third:]):
+                if part:
+                    ev({"content": part})
+        ev({}, choice.get("finish_reason", "stop"))
+        chunk("data: [DONE]\n\n")
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
     def reply(self, code, obj):
+        if self.want_stream and code == 200 and isinstance(obj, dict) and obj.get("object") == "chat.completion":
+            return self.stream_reply(obj)
         data = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -40,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         ua = self.headers.get("User-Agent", "")
         if url.path == "/v1/models":
+            self._n = getattr(self, "_n", 0) + 1
+            sys.stderr.write("mock_conn: connection %d request #%d models\n" % (id(self) % 100000, self._n))
             return self.reply(200, {"object": "list", "data": [{"id": "dead-model"}, {"id": "live-model"}, {"id": "lazy-model"}]})
         if url.path == "/api.php":
             q = parse_qs(url.query)
@@ -143,6 +189,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(200, final("<think>plan</think>According to the Dark Souls wiki, you get the Lordvessel from Frampt after ringing both Bells of Awakening. More at https://darksouls.fandom.com/wiki/Lordvessel"))
 
     def nim(self, body):
+        self._n = getattr(self, "_n", 0) + 1
+        self.want_stream = bool(body.get("stream"))
+        sys.stderr.write("mock_conn: connection %d request #%d stream=%s\n" % (id(self) % 100000, self._n, self.want_stream))
         auth = self.headers.get("Authorization", "")
         sys.stderr.write("mock_nim: model=%s thinking=%s auth=%s\n" % (
             body.get("model"), body.get("chat_template_kwargs"), auth[:14]))
@@ -162,4 +211,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 sys.stderr.write("mock_api: listening on 127.0.0.1:%d (mode %s)\n" % (PORT, MODE))
-HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

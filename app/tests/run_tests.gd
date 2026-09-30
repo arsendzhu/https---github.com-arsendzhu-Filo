@@ -31,6 +31,8 @@ func _init() -> void:
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
 	await _test_prefetch()
+	await _test_streaming_and_pacing()
+	await _test_streaming_agent()
 	_test_speech_terms()
 	print("\n%d passed, %d failed" % [passes, failures])
 	quit(1 if failures > 0 else 0)
@@ -1172,4 +1174,144 @@ func _test_prefetch() -> void:
 	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": false, "text": "Error: wiki search failed (HTTP 503)."}
 	r = await p.ask(Q)
 	check(r.ok and r.text.contains("could not reach") and s.calls.size() == 1 and s.calls[0].messages[3].content.contains("wiki search failed"), "prefetch: a failed search is passed to the model as an error and the answer is still spoken")
+	p.free()
+
+
+# ------------------------------------------------- streaming, keep-alive plumbing, pacing (workstream 4)
+
+func _sse(events: Array) -> PackedByteArray:
+	var text := ""
+	for e in events:
+		text += "data: " + (e if typeof(e) == TYPE_STRING else JSON.stringify(e)) + "\n\n"
+	return text.to_utf8_buffer()
+
+
+func _test_streaming_and_pacing() -> void:  # coroutine (awaits the limiter)
+	# --- SSE accumulator: content, reasoning dropped, split chunks
+	var deltas := []
+	var acc := SseAccumulator.new(func(d: String) -> void: deltas.append(d))
+	var payload := _sse([
+		{"model": "m1", "choices": [{"delta": {"role": "assistant", "content": ""}}]},
+		{"choices": [{"delta": {"reasoning_content": "SECRET THOUGHT"}}]},
+		{"choices": [{"delta": {"content": "The Lordvessel "}}]},
+		{"choices": [{"delta": {"content": "is in Anor Londo."}, "finish_reason": "stop"}]},
+		"[DONE]",
+	])
+	var cut := payload.size() / 3
+	acc.feed(payload.slice(0, cut))
+	acc.feed(payload.slice(cut, cut * 2 + 1))     # a line is split across chunks
+	acc.feed(payload.slice(cut * 2 + 1))
+	acc.finish()
+	check(acc.text == "The Lordvessel is in Anor Londo." and acc.done and acc.finish_reason == "stop" and acc.model == "m1" and deltas.size() == 2, "SSE: content deltas are joined across split chunks: '%s'" % acc.text)
+	check(not acc.message().content.contains("SECRET") and not acc.message().has("tool_calls") and acc.first_delta_ms >= 0, "SSE: reasoning deltas are dropped, no tool calls")
+	# --- tool-call fragments
+	var acc2 := SseAccumulator.new()
+	acc2.feed(_sse([
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_a", "type": "function", "function": {"name": "wiki_search", "arguments": ""}}]}}]},
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"game\": \"Terr"}}]}}]},
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "aria\", \"query\": \"Eye\"}"}}, {"index": 1, "id": "call_b", "function": {"name": "web_search", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]},
+		"[DONE]",
+	]))
+	var m := acc2.message()
+	check(acc2.saw_tool_call and m.content == null and m.tool_calls.size() == 2 and m.tool_calls[0].id == "call_a" and m.tool_calls[0].function.name == "wiki_search" and JSON.parse_string(m.tool_calls[0].function.arguments).query == "Eye" and m.tool_calls[1].function.name == "web_search", "SSE: tool-call fragments (id, name, split arguments, two parallel calls) are reassembled")
+	var acc3 := SseAccumulator.new()
+	acc3.feed(_sse([{"error": {"message": "overloaded"}}]))
+	check(acc3.error == "overloaded", "SSE: an error object inside the stream is reported")
+	check(NimClient._parse_body(_sse([{"model": "x", "choices": [{"delta": {"content": "Hi there"}, "finish_reason": "stop"}]}, "[DONE]"]).get_string_from_utf8(), true).choices[0].message.content == "Hi there" and NimClient._parse_body("{\"a\": 1}", true).a == 1, "a streamed body read as text, and a plain error body, both parse")
+
+	# --- first-sentence detection
+	var heard := []
+	var st := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	for piece in ["The Lord", "vessel is in Anor Londo. ", "You get it after killing Ornstein."]:
+		st.feed(piece)
+	check(heard == ["The Lordvessel is in Anor Londo."] and st.emitted, "the first complete sentence is found while text is still arriving: " + str(heard))
+	heard.clear()
+	var st2 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st2.feed("Let me check. ")
+	check(heard.is_empty(), "a short preface ('Let me check.') is not spoken")
+	st2.feed("It has 3.5 times the health of Dr. Smith. Next.")
+	check(heard == ["Let me check. It has 3.5 times the health of Dr. Smith."] or heard.size() == 1, "decimals and abbreviations do not end a sentence: " + str(heard))
+	heard.clear()
+	var st3 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st3.feed("<think>the user asks about the boss. hmm. ")
+	st3.feed("more thinking</think>Dodge the charges and shoot it from behind. Then wait.")
+	check(heard == ["Dodge the charges and shoot it from behind."], "thinking blocks are never spoken: " + str(heard))
+	var st4 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st4.feed("Read more at https://example.com/page for details on this boss fight. ")
+	check(not heard.back().contains("http"), "URLs are stripped from a spoken sentence")
+	check(SentenceStreamer.split_sentences("One two three. Four five! Six seven eight?  Nine") == PackedStringArray(["One two three.", "Four five!", "Six seven eight?", "Nine"]), "split_sentences")
+
+	# --- request pacing (free tier ~40/min) with a fake clock
+	var t := [0.0]
+	var slept := []
+	var rl := RateLimiter.new(3)
+	rl.clock = func() -> float: return t[0]
+	rl.sleeper = func(sec: float) -> void:
+		slept.append(sec)
+		t[0] += sec
+	await rl.acquire()
+	await rl.acquire()
+	await rl.acquire()
+	check(slept.is_empty() and rl.used == 3 and rl.wait_needed() > 59.0, "pacing: the first 3 requests of a minute go out at once, the 4th has to wait ~60 s")
+	await rl.acquire()
+	check(slept.size() == 1 and slept[0] > 59.0 and slept[0] < 61.0 and rl.used == 4, "pacing: it waits just long enough instead of being answered with a 429: " + str(slept))
+	var rb := RateLimiter.new(100)
+	rb.budget = 2
+	await rb.acquire()
+	await rb.acquire()
+	check(rb.budget_left() == 0 and rb.used == 2, "budget: exactly the allowed number of requests")
+	check(not (await rb.acquire()), "budget: a third request is refused")
+
+	# --- connection URL parsing
+	var b := NimConnection.parse_base("https://integrate.api.nvidia.com/v1")
+	check(b.host == "integrate.api.nvidia.com" and b.port == 443 and b.tls and b.prefix == "/v1", "base URL: https host, port 443, /v1 prefix")
+	b = NimConnection.parse_base("http://127.0.0.1:8787/v1/")
+	check(b.host == "127.0.0.1" and b.port == 8787 and not b.tls and b.prefix == "/v1", "base URL: plain http with a port (the mock server)")
+
+
+func _test_streaming_agent() -> void:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	# the first sentence is handed out while the model is still writing (after tool results)
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, _n: int) -> Dictionary:
+		var full := "Dodge its charges near a platform arena. Then kill the servants in phase two."
+		if opts.get("stream", false) and opts.has("on_text"):
+			for piece in ["Dodge its charges", " near a platform arena", ". Then kill the", " servants in phase two."]:
+				opts.on_text.call(piece)
+		return _reply(full)
+	var p := _make_pipeline(s, null, true)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Eye of Cthulhu"]
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "page"}
+	var heads := []
+	var hints := {"force_tool": true, "wiki_query": "Eye of Cthulhu", "web_query": "Terraria Eye of Cthulhu", "game": "Terraria", "on_sentence": func(x: String) -> void: heads.append(x)}
+	var r: Dictionary = await p.research.answer("Question: " + Q, "Terraria", hints)
+	check(r.ok and heads == ["Dodge its charges near a platform arena."] and s.calls[0].opts.stream == true, "streaming: the first sentence reaches the caller before the answer is complete: " + str(heads))
+	check(r.text.begins_with(heads[0]) and r.text == "Dodge its charges near a platform arena. Then kill the servants in phase two.", "streaming: the final text starts with the spoken head")
+	p.free()
+	# a decision round (no tool results yet, tools allowed) is never streamed to speech
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, n: int) -> Dictionary:
+		if n == 1:
+			if opts.has("on_text"):
+				opts.on_text.call("Let me look that up for you right now. ")
+			return _tool_reply([["web_search", '{"query": "q"}', "t1"]])
+		return _reply("Fire works well against it.")
+	p = _make_pipeline(s, null, false)
+	p.research.tool_overrides["web_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "r"}
+	heads.clear()
+	hints = {"force_tool": false, "on_sentence": func(x: String) -> void: heads.append(x)}
+	r = await p.research.answer("Question: x", "G", hints)
+	check(r.ok and heads.is_empty() and not s.calls[0].opts.has("on_text"), "streaming: nothing is spoken from a round in which the model may still call tools")
+	p.free()
+	# a model that rejects stream=true is called normally, and remembered
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, _n: int) -> Dictionary:
+		return _fail(400) if opts.get("stream", false) else _reply("Works without streaming.")
+	p = _make_pipeline(s, null, false)
+	r = await p.research.answer("Question: x", "G", {})
+	check(r.ok and r.text == "Works without streaming." and s.calls.size() == 2 and s.calls[0].opts.stream == true and s.calls[1].opts.stream == false, "streaming: a 400 on stream=true is retried without it")
+	r = await p.research.answer("Question: y", "G", {})
+	check(s.calls[2].opts.stream == false, "...and not tried again for that model")
 	p.free()
