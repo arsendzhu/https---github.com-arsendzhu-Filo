@@ -60,6 +60,7 @@ const DEFAULTS := {
 	"default_profile": "sekiro",
 	"profiles_dir": "profiles",
 	"hotkey": {"key": "space", "modifiers": ["option"]},
+	"hotkey_mute": {"key": "m", "modifiers": ["control", "option"]},   # backup for the mic mute button; key "" disables it
 	"helper": {
 		"enabled": true,
 		"path": "helper/build/Filo Helper.app",
@@ -261,13 +262,13 @@ func resolve_path(p: String) -> String:
 	return FiloConfig.project_root().path_join(p).simplify_path()
 
 
-func hotkey_label() -> String:
-	var mods: Array = get_value("hotkey.modifiers", [])
+func hotkey_label(path: String = "hotkey") -> String:
+	var mods: Array = get_value(path + ".modifiers", [])
 	var symbols := {"command": "⌘", "cmd": "⌘", "option": "⌥", "alt": "⌥", "control": "⌃", "ctrl": "⌃", "shift": "⇧"}
 	var out := ""
 	for m in mods:
 		out += symbols.get(str(m).to_lower(), str(m))
-	var key := str(get_value("hotkey.key", "space"))
+	var key := str(get_value(path + ".key", "space"))
 	return out + (" " if out != "" else "") + key.capitalize()
 
 

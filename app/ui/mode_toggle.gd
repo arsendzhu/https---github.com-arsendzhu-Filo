@@ -1,8 +1,7 @@
 class_name ModeToggle
 extends Control
-## A very subtle voice/text toggle for follow-up questions, shown once the
-## conversation has had its first answer: a mic glyph while in voice mode, a
-## small keyboard glyph while in text mode. Purely a view — Main decides what
+## A very subtle voice/text toggle for follow-up questions, shown in the control bar from launch:
+## sound-wave bars while follow-ups are spoken, a small keyboard glyph while they are typed. Purely a view — Main decides what
 ## each mode actually does.
 
 signal pressed
@@ -16,7 +15,6 @@ func _ready() -> void:
 	custom_minimum_size = Vector2(20.0, 20.0)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	visible = false
 	tooltip_text = "Switch to typing"
 
 
@@ -37,10 +35,10 @@ func _gui_input(event: InputEvent) -> void:
 func _draw() -> void:
 	var c := GLYPH
 	if mode == "voice":
-		draw_rect(Rect2(7.0, 2.0, 6.0, 9.0), c)
-		draw_arc(Vector2(10.0, 11.0), 5.0, 0.0, PI, 10, c, 1.4, true)
-		draw_line(Vector2(10.0, 16.0), Vector2(10.0, 18.5), c, 1.4, true)
-		draw_line(Vector2(6.5, 18.5), Vector2(13.5, 18.5), c, 1.4, true)
+		var heights: Array[float] = [4.0, 9.0, 14.0, 9.0, 4.0]
+		for i in 5:
+			var h: float = heights[i]
+			draw_line(Vector2(3.5 + i * 3.2, 10.0 - h * 0.5), Vector2(3.5 + i * 3.2, 10.0 + h * 0.5), c, 1.8, true)
 	else:
 		draw_rect(Rect2(2.0, 5.0, 16.0, 10.0), c, false, 1.4, true)
 		for row in 2:

@@ -159,6 +159,18 @@ expect "$OUT/mock_api.log" "mock_gamewiki: query 'Eye of Cthulhu'" "the game's w
 expect "$OUT/e2e_terraria.log" "ANSWER (lazy-model, web): According to the Terraria wiki" "the spoken answer is grounded in the tool result, not the model's memory"
 no_script_errors "$OUT/e2e_terraria.log"
 
+echo "== 2g/4 UI controls + click-through + mute/typing over the real bridge (real scene, real helper process)"
+rm -f "$OUT/ui_cmds.jsonl"
+# fake keys + closed local ports: this run loads the project's config/.env like the app does, so nothing may
+# be able to reach a real API (the only live calls allowed are scripts/bench_live.py's)
+FILO_UI_TEST_LOG="$OUT/ui_cmds.jsonl" FILO_PROVIDER=anthropic ANTHROPIC_API_KEY=test-key NVIDIA_API_KEY=nvapi-test "$GODOT" --headless --path "$ROOT/app" -s tests/ui_tests.gd -- \
+  --api-base http://127.0.0.1:9 --nim-base http://127.0.0.1:9/v1 --wiki-base http://127.0.0.1:9 \
+  --helper-cmd "$PY" --helper-args "$ROOT/scripts/fake_helper.py --idle --log-commands $OUT/ui_cmds.jsonl" \
+  --no-greet --mute --port 47890 --tts-provider system > "$OUT/ui.log" 2>&1
+grep -E "ui tests|FAIL" "$OUT/ui.log"
+expect "$OUT/ui.log" ", 0 failed" "UI controls, passthrough geometry and IPC round trips"
+no_script_errors "$OUT/ui.log"
+
 echo "== 3/4 showcase captures"
 "$GODOT" --path "$ROOT/app" -- --showcase --capture-dir "$OUT/captures" --mute --no-helper --tts-provider system --quit-after 70 > "$OUT/showcase.log" 2>&1
 COUNT=$(ls "$OUT/captures" 2>/dev/null | grep -c "_review.png")

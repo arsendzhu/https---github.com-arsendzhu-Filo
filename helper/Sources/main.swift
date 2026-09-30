@@ -17,6 +17,9 @@ struct Options {
     var wakePhrase = ""          // empty = wake word off
     var wakeSilenceMs = 1500
     var testMatcher = false
+    var muteKey = ""             // empty = no mute hotkey
+    var muteMods: [String] = []
+    var parentPid: Int32 = 0     // Filo's own process, never treated as "the game" when giving focus back
 }
 
 func parseOptions() -> Options {
@@ -42,6 +45,12 @@ func parseOptions() -> Options {
         case "--wake-word": if let v = next() { o.wakePhrase = v }
         case "--wake-silence-ms": if let v = next(), let ms = Int(v) { o.wakeSilenceMs = ms }
         case "--test-matcher": o.testMatcher = true
+        case "--mute-key": if let v = next() { o.muteKey = v }
+        case "--mute-mods":
+            if let v = next() {
+                o.muteMods = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
+        case "--parent-pid": if let v = next(), let p = Int32(v) { o.parentPid = p }
         default: break   // ignore LaunchServices args such as -psn_...
         }
         i += 1

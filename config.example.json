@@ -103,5 +103,12 @@
     "search_provider": "duckduckgo",
     "max_redirects": 3,
     "max_fetch_bytes": 1500000
+  },
+  "hotkey_mute": {
+    "key": "m",
+    "modifiers": [
+      "control",
+      "option"
+    ]
   }
 }

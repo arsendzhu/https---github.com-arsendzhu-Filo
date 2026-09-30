@@ -13,6 +13,8 @@ final class SpeechCapture {
     private let allowServer: Bool
     private let send: ([String: Any]) -> Void
     private(set) var active = false
+    /// Microphone muted by the user: a capture session may not start.
+    var micMuted = false
     private var stopping = false
     private var finalSent = false
     private var lastPartial = ""
@@ -42,7 +44,7 @@ final class SpeechCapture {
     // MARK: - lifecycle
 
     func start() {
-        guard !active else { return }
+        guard !active, !micMuted else { return }
         wantsStart = true
         guard let recognizer = recognizer, recognizer.isAvailable else {
             send(["event": "error", "code": "speech_unavailable",

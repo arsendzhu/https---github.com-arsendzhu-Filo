@@ -33,16 +33,22 @@ repo/
 
 ## Clickable controls on a click-through overlay
 
-The overlay is click-through everywhere by default (`Window.mouse_passthrough`), so the game
-underneath always gets the click — except the bubble's two small buttons (mute, and the
-voice/text follow-up switch) need to be clickable themselves. `Main._update_click_regions()`
-runs every frame: it reads the buttons' current on-screen rect (`Control.get_global_rect()`,
-already in the window's local point space) and writes it to `Window.mouse_passthrough_polygon`
-— macOS then treats that one small region as normal and interactive, and leaves the window
-click-through everywhere else. It's skipped whenever something else already needs the whole
-window interactive (the typed-question panel, or the no-helper fallback), so it can never fight
-those; property writes are skipped when the rect hasn't actually changed, to keep the per-frame
-cost negligible.
+The always-visible **control bar** (`app/ui/control_bar.gd`: mic mute, voice mute, follow-up mode,
+type a question) sits next to the cube from the first frame. It used to live inside the speech
+bubble, which is hidden until Filo speaks, so on first launch there was nothing to click.
+
+The window is click-through (`Window.mouse_passthrough`) so the game gets every click, except over
+the bar. `Main._apply_window_mode()` runs every frame: it takes the global cursor position
+(`DisplayServer.mouse_get_position()`, screen pixels), converts it to window points with the
+*current* display scale (`ClickRegion`, `app/core/click_region.gd`) and switches the whole-window
+flag off only while the cursor is over a control (plus 6 pt of slack). The previous approach wrote
+the control rects to `Window.mouse_passthrough_polygon`, which Godot applies in window *pixels*
+while `Control.get_global_rect()` is in *points* — on a Retina display (scale 2) the clickable
+region was half the size and in the wrong place, so the buttons were drawn but every click fell
+through. Typing (and the no-helper fallback) makes the whole window interactive and focusable;
+closing the box makes it click-through and unfocusable again and asks the helper to give keyboard
+focus back to the game (`focus_save` / `focus_restore`). A change of display scale (window dragged
+to another monitor) is detected each frame and the window is re-sized in points (`Main.apply_scale`).
 
 ## LLM providers
 
@@ -87,11 +93,15 @@ that" bubble. While Filo speaks, the wake listener is paused so it cannot wake i
 | `partial` / `final` | text | live transcript / finished transcript (empty if nothing was heard) |
 | `level` | value 0..1 | mic RMS while listening (drives the pulse) |
 | `apps` | apps[{name,bundle_id}] | running apps, for game detection |
-| `error` | code, message | permission / device / recognition problems, shown in the bubble |
+| `error` | code, message | permission / device / recognition problems, shown in the bubble (`muted`: a hold while the mic is muted) |
+| `mute_state` | muted, source (`command` \| `hotkey`) | the microphone was muted/unmuted: the acknowledgement of `set_mute`, or the helper's own mute hotkey |
 
 App → helper: `ping`, `list_apps`, `wake_pause`, `wake_resume`, `set_wake{enabled}`,
 `listen_open{timeout_ms}` (capture the next utterance without a wake phrase, after "anything
-else?"), `listen_stop`, `quit`, `simulate_hotkey{pressed}` (test hook).
+else?"), `listen_stop`, `set_mute{muted}` (microphone off/on, acknowledged with `mute_state`),
+`focus_save` / `focus_restore` (remember the frontmost app before the typed box takes the keyboard,
+give it back afterwards), `quit`, `simulate_hotkey{pressed}` (test hook). New helper launch flags:
+`--mute-key`, `--mute-mods`, `--parent-pid`.
 
 ### Inside the helper
 

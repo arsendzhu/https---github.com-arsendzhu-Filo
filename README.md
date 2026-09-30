@@ -45,13 +45,18 @@ Filo remembers the last few turns, so "what about its second phase?" works as a 
 If you say nothing for 30 s after "anything else?", it stops listening for follow-ups but stays
 on screen; "hey filo" wakes it again.
 
-The bubble has two small buttons in its bottom-left corner (they're clickable even though the
-overlay itself is click-through everywhere else):
+A small **control bar** sits beside the cube from the moment Filo launches (even while it is
+asleep). Its buttons are clickable although the rest of the overlay is click-through, so the game
+underneath stays usable:
 
-- **speaker icon** — mutes/unmutes Filo's voice instantly, any time. Answers still appear as text.
-- **mic/keyboard icon** — appears after the first answer; switches how the *next* "anything else?"
-  is followed up: voice (mic opens, bubble shows "Listening") or text (an empty box opens, type
-  your follow-up). Click it mid-listening or mid-typing to switch immediately.
+- **microphone** — mutes/unmutes the microphone: the wake word goes deaf, push-to-talk does nothing
+  (a tap still opens the text box) and macOS' orange mic dot goes away. Backup hotkey `⌃⌥ M`
+  (`hotkey_mute` in `config.json`; set its `key` to `""` to disable).
+- **speaker** — mutes/unmutes Filo's voice instantly, any time. Answers still appear as text.
+- **sound-waves / keyboard** — how the *next* "anything else?" is followed up: voice (mic opens) or
+  text (an empty box opens). Click it mid-listening or mid-typing to switch immediately.
+- **speech bubble with a cursor** — opens the typed-question box (waking Filo if needed). The box
+  takes keyboard focus while it is open and hands it back to the game when it closes.
 
 **First launch:** macOS asks for **Speech Recognition** and **Microphone** for "Filo Helper"
 (the wake word listens all the time, on-device, and macOS shows its orange microphone dot
@@ -126,6 +131,7 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `behavior.reprompt_phrases`, `behavior.farewell_phrases` | lists | what Filo says after an answer / on "bye filo" |
 | `wake_word.enabled`, `wake_word.phrase`, `wake_word.bye_phrase`, `wake_word.silence_ms` | true, `hey filo`, `bye filo`, 1500 | always-on wake word, the goodbye phrase, the pause that ends a question |
 | `hotkey.key`, `hotkey.modifiers` | `space`, `["option"]` | push-to-talk key |
+| `hotkey_mute.key`, `hotkey_mute.modifiers` | `m`, `["control", "option"]` | microphone mute hotkey (backup for the mute button); empty key = off |
 | `default_profile`, `profiles_dir` | `sekiro`, `profiles` | which game's notes to load; a running game switches profiles by app name |
 | `helper.path`, `helper.port`, `helper.allow_server_speech`, `helper.locale` | … | native helper settings |
 | `tts.provider` | `auto` | `auto` = Kokoro when installed, else the system voice; or `kokoro` / `system` |

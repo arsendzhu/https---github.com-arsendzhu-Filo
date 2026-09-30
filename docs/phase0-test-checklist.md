@@ -12,7 +12,7 @@ cp .env.example .env               # add NVIDIA_API_KEY (or ANTHROPIC_API_KEY)
 scripts/test.sh                    # unit tests + offline end-to-end + showcase captures
 ```
 
-Expected: `386 passed, 0 failed`, only `ok:` lines (no `FAIL:`), `captured 24 review frames`, `ALL TESTS PASSED`.
+Expected: `455 passed, 0 failed` (unit) and `83 passed, 0 failed` (ui), only `ok:` lines (no `FAIL:`), `captured 24 review frames`, `ALL TESTS PASSED`.
 Optional but recommended: `scripts/setup_voice.sh` (installs the free Kokoro voice, ~340 MB).
 
 ## 1. Launch
@@ -48,18 +48,16 @@ Say: **"Hey Filo, I'm stuck on the Guardian Ape, what am I missing?"** (pause wh
 - [ ] Ask "who are you?" → it describes itself as a general game companion/wiki guide, not a
       Sekiro-only bot (it should still mention it's currently loaded with Sekiro notes).
 
-## 2b. Bubble controls, and the mascot never getting stuck on one look
+## 2b. Control bar, and the mascot never getting stuck on one look
 
-- [ ] A small speaker icon sits in the bubble's bottom-left corner, in every bubble mode. Click
-      it: Filo goes silent instantly (if it was mid-answer, the text stays fully visible and it
-      moves on without auto-reprompting); the icon switches to a slashed speaker. Click again to
-      restore sound. This should work even though clicking elsewhere on the overlay still passes
-      through to whatever's behind it.
-- [ ] After the *first* answer, a second small icon (a mic) appears next to the speaker icon.
-      Click it: it becomes a small keyboard icon, and the *next* "anything else?" opens an empty
-      text box instead of the microphone (type a follow-up, or "bye", to test it). Click it again
-      while that box is open to switch back to voice immediately. Say "bye filo" or dismiss and
-      wake again — the icon should reset to the mic (voice mode) for the new conversation.
+- [ ] From launch (even before "hey filo") a small dark bar with four icons sits left of the cube:
+      microphone, speaker, sound-waves, speech bubble. MANUAL_TESTS.md has the full click
+      checklist. The speaker mutes Filo's voice instantly (if it was mid-answer, the text stays
+      fully visible and it moves on without auto-reprompting); the icon shows a slash while muted.
+      This works although clicking elsewhere on the overlay still passes through to the game.
+- [ ] The sound-waves icon switches the next "anything else?" between voice and a text box (it
+      becomes a keyboard while in text mode). Click it while that box is open to switch back to
+      voice immediately; say "bye filo" or dismiss and wake again - it resets to voice.
 - [ ] Have a longer conversation — 6-8 questions in a row. The idle face between turns should
       visibly vary (the classic look, a curious wide-eyed glance, a focused narrower look, an
       extra-cute big-eyed look, the happy "^ ^" look), never stuck on one, and the original

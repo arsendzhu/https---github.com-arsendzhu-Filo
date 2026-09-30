@@ -41,3 +41,30 @@ Interface rule from the task ("ask before breaking the Python<->Godot interface"
 ### Not verifiable overnight
 - Whether NIM's DeepSeek/Nemotron accept `tool_choice: "required"`: needs a live call (`scripts/bench_live.py`, only with the user's key). The code handles both outcomes (degrade + app-side forced search), so behaviour is correct either way; only latency differs.
 
+## Incident: one accidental live NIM call (logged as required by the rules)
+While building the UI test (workstream 2) I ran `app/tests/ui_tests.gd` once by hand without fake keys. The app loads the project's `.env` by itself (the normal mechanism), so two typed/voice test questions were answered by the real NIM (`provider=nim`, local-notes route: at most 2 chat requests). I did not read `.env`; the key was never printed. Fix: the UI test (and `scripts/test.sh` scenario 2g) now run with fake keys in the environment (environment beats `.env`) and every base URL pointed at a closed local port, so no test can reach a real API. The only live calls allowed remain `scripts/bench_live.py`'s.
+
+## Workstream 2 - overlay controls missing / not clickable
+
+### Root causes
+1. **Not visible on first launch**: the only controls (voice mute, follow-up mode) were children of the speech bubble, which is `visible=false, alpha 0` until Filo speaks, and the mode button was additionally hidden until the first answer. A freshly launched Filo had nothing to click. There was no typing button and no mic mute at all.
+2. **Not clickable**: `Main._update_click_regions()` wrote the control rects (window-local *points*, from `Control.get_global_rect()`) into `Window.mouse_passthrough_polygon`, which Godot applies in window *pixels*. With `content_scale_factor = 2.0` (Retina) the region was half the size and shifted toward the top-left, so it never covered the buttons and every click fell through to the game. (Inferred from Godot/macOS behaviour and the launch log - a `1240x840 px` window for a `620x420 pt` layout - not reproducible without a real click; see MANUAL_TESTS.md.)
+3. **Typing never returned focus**: closing the typed box only called `_update_click_regions()`; `unfocusable` stayed false after the first typing session (the overlay could keep grabbing keyboard focus from the game) and nothing handed focus back.
+4. **Mute**: nothing muted the capture side. The existing speaker button only muted Filo's *voice*.
+
+### Changes
+- New always-visible `ControlBar` (mic mute, voice mute, follow-up mode, type) on a dark pill next to the cube; buttons are `mouse_filter=STOP`, the pill itself `PASS`. Controls removed from the bubble.
+- `ClickRegion` (pure geometry) + `Main._apply_window_mode()`: per frame, cursor position (screen px) -> window points with the *live* display scale -> flip the whole-window `mouse_passthrough` only while over a control. The polygon is no longer used. `Main.apply_scale` re-sizes the window in points when the display scale changes.
+- Typing: `focus_save` before Filo activates, field focus, `focus_restore` on close, window back to click-through + unfocusable. Same `_ask()` path as voice (`question_asked(text, source)`).
+- Mute: `set_mute{muted}` over the bridge; the helper stops the wake listener, push-to-talk and the audio engine, acknowledges with `mute_state`; the button turns red and struck through, the bubble explains; backup hotkey `control+option+M` (`hotkey_mute`, empty key disables) reported back as `mute_state{source:hotkey}`. A hold while muted answers with a notice; a tap still opens the text box.
+- Helper (Swift): second Carbon hotkey (ids distinguished), mute state, front-app tracking + `focus_restore`. It compiles (`swiftc` to a temp dir); **the installed helper app is not rebuilt** (MANUAL_TESTS.md step 0: rebuilding re-signs it and may re-prompt for Microphone/Speech permission).
+- Tests (`app/tests/ui_tests.gd`, run by `scripts/test.sh` 2g, real main scene + real helper process over the real TCP bridge): `test_ui_controls_visible_on_launch`, `test_passthrough_covers_controls` (region covers every control; cursor -> decision at scales 1/2/3; the old half-size bug; show/hide; resize; DPI change), mute round trip (the command arrives at the helper process, the ack is matched, hotkey mirror), typing round trip (focus_save/focus_restore, field focus, window mode, typed and voice questions share `_ask`).
+
+### Test expectation changes (justified)
+- `_test_bubble_controls`: "mode button starts hidden until the first answer" -> "starts visible": the task explicitly requires every control visible on launch. The polygon helper `Main.rect_to_polygon` and its test are kept (unused by the window).
+- Headless Godot cannot read Window flags back (they reset to false after the first frame under the dummy display server), so tests assert `Main.window_state`, the mode the code requests from the OS.
+- `app/tests/run_tests.gd` fixture: a 42-char fake `nvapi-...` string shortened to `nvapi-fixture` because `verify.sh`'s key scan flags any `nvapi-` + 20 chars (it was not a real key: it contained "test"/"abc").
+
+### Cannot verify overnight
+- The real `NSWindow.ignoresMouseEvents` behaviour and a real mouse click (no Accessibility permission, no clicking). Covered by MANUAL_TESTS.md.
+

@@ -10,9 +10,12 @@ final class HotKey {
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     private let handler: Handler
+    private let id: UInt32
 
-    init?(keyCode: UInt32, modifiers: UInt32, handler: @escaping Handler) {
+    /// `id` tells several hotkeys apart: every installed handler sees every hotkey event.
+    init?(id: UInt32 = 1, keyCode: UInt32, modifiers: UInt32, handler: @escaping Handler) {
         self.handler = handler
+        self.id = id
         var types = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
@@ -21,6 +24,10 @@ final class HotKey {
         let installStatus = InstallEventHandler(GetEventDispatcherTarget(), { (_, event, userData) -> OSStatus in
             guard let event = event, let userData = userData else { return OSStatus(eventNotHandledErr) }
             let me = Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue()
+            var eventID = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &eventID)
+            guard eventID.id == me.id else { return OSStatus(eventNotHandledErr) }
             let kind = GetEventKind(event)
             me.handler(kind == UInt32(kEventHotKeyPressed))
             return noErr
@@ -29,7 +36,7 @@ final class HotKey {
             Log.info("InstallEventHandler failed: \(installStatus)")
             return nil
         }
-        let hotKeyID = EventHotKeyID(signature: 0x46494C4F /* 'FILO' */, id: 1)
+        let hotKeyID = EventHotKeyID(signature: 0x46494C4F /* 'FILO' */, id: id)
         let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
         guard status == noErr else {
             Log.info("RegisterEventHotKey failed: \(status)")

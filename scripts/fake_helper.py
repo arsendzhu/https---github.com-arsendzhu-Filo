@@ -23,6 +23,8 @@ ap.add_argument("--tap-first", action="store_true")
 ap.add_argument("--wake", action="store_true", help="use the wake word instead of the hotkey")
 ap.add_argument("--followup", default="", help="answer Filo's first 'anything else?' with this question, then say bye")
 ap.add_argument("--no-bye", action="store_true", help="let open listening time out instead of saying bye")
+ap.add_argument("--idle", action="store_true", help="connect and answer commands only; no scripted speech (used by the UI/IPC tests)")
+ap.add_argument("--log-commands", default="", help="append every command received from Filo to this file (one JSON object per line)")
 ap.add_argument("--wait-url", default="", help="poll this URL until it answers (e.g. the Kokoro /health) before scripting speech")
 args, _unknown = ap.parse_known_args()
 
@@ -87,6 +89,9 @@ def reader():
                 continue
             sys.stderr.write("fake_helper <- %s\n" % json.dumps(cmd))
             sys.stderr.flush()
+            if args.log_commands:
+                with open(args.log_commands, "a") as f:
+                    f.write(json.dumps(cmd) + "\n")
             if cmd.get("cmd") == "quit":
                 sys.exit(0)
             if cmd.get("cmd") == "ping":
@@ -95,6 +100,8 @@ def reader():
                 send({"event": "apps", "apps": [{"name": "Finder", "bundle_id": "com.apple.finder"}]})
             if cmd.get("cmd") == "listen_open":
                 on_listen_open(cmd)
+            if cmd.get("cmd") == "set_mute":   # like the real helper: acknowledge every mute change
+                send({"event": "mute_state", "muted": bool(cmd.get("muted")), "source": "command"})
     sys.exit(0)
 
 
@@ -111,6 +118,10 @@ if args.wait_url:
             time.sleep(0.5)
 send({"event": "apps", "apps": [{"name": "Finder", "bundle_id": "com.apple.finder"}]})
 time.sleep(args.delay)
+
+if args.idle:
+    while True:
+        time.sleep(1)
 
 if args.tap_first:
     send({"event": "tap", "duration_ms": 120})

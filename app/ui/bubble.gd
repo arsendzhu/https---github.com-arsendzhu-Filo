@@ -19,8 +19,6 @@ var panel: PanelContainer
 var header: Label
 var body: Label
 var footer: Label
-var sound_button: SoundToggle
-var mode_button: ModeToggle
 var max_width := 340.0
 var tail_y := 40.0
 var tail_anchor_x := 0.0     # x of the tail tip, set by Main every frame
@@ -56,16 +54,6 @@ func _ready() -> void:
 	vbox.add_child(header)
 	vbox.add_child(body)
 	vbox.add_child(footer)
-	# A small control row, laid out in-flow (not floated) so it can never
-	# overlap the footer text above it — the layout engine keeps them apart.
-	var controls := HBoxContainer.new()
-	controls.mouse_filter = MOUSE_FILTER_IGNORE
-	controls.add_theme_constant_override("separation", 10)
-	vbox.add_child(controls)
-	sound_button = SoundToggle.new()
-	controls.add_child(sound_button)
-	mode_button = ModeToggle.new()
-	controls.add_child(mode_button)
 	visible = false
 	modulate.a = 0.0
 

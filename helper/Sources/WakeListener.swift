@@ -43,6 +43,8 @@ final class WakeListener {
     // running — and picking up Filo's own voice — while it speaks.
     /// false = no wake phrase; sessions only run while open listening is requested
     var detectWake = true
+    /// Microphone muted by the user: no session may start until it is cleared.
+    var micMuted = false
 
     var phrase: String { matcher.phrase }
     var isCapturing: Bool { capturing }
@@ -60,7 +62,7 @@ final class WakeListener {
 
     /// Starts wake-phrase listening (no-op when the wake word is disabled).
     func start() {
-        guard detectWake else { return }
+        guard detectWake, !micMuted else { return }
         enabled = true
         guard !sessionActive else { return }
         guard let recognizer = recognizer, recognizer.isAvailable else {
@@ -92,6 +94,10 @@ final class WakeListener {
     /// wake phrase. Sends `partial`/`final`, or `listen_timeout` after `timeout`
     /// seconds of silence, or `bye` if the player says goodbye.
     func listenOpen(timeout: TimeInterval) {
+        guard !micMuted else {
+            send(["event": "listen_timeout", "reason": "muted"])
+            return
+        }
         enabled = true
         guard let recognizer = recognizer, recognizer.isAvailable else {
             send(["event": "listen_timeout", "reason": "speech_unavailable"])

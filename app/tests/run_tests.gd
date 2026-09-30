@@ -429,7 +429,7 @@ func _test_bubble_controls() -> void:
 
 	var mode := ModeToggle.new()
 	mode._ready()
-	check(mode.mode == "voice" and not mode.visible, "mode button starts in voice mode and hidden until the first answer")
+	check(mode.mode == "voice" and mode.visible, "mode button starts in voice mode and visible (the control bar shows every control from launch; it used to hide until the first answer)")
 	mode.set_mode("text")
 	check(mode.mode == "text" and mode.tooltip_text == "Switch to talking", "mode button reflects text mode")
 	mode.set_mode("voice")
