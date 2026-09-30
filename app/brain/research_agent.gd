@@ -44,6 +44,11 @@ var wikis: Dictionary = {}
 ## "off" = let the model decide. Whatever the mode, a factual question that got no tool call from
 ## the model gets one run for it (see _run_loop), so the tool loop can never be silently skipped.
 var force_first_tool := "required"
+## Speed: for a factual question run the wiki search (and read its top page) app-side right away, in the
+## same moment the model would have decided to, so the first model call already has the material and can
+## usually answer at once (one model round trip instead of three). The model still gets every tool and may
+## search again. false = the model does all the calling itself.
+var prefetch := true
 var discovered_path := "user://discovered_wikis.json"
 var log_tag := ""
 
@@ -65,6 +70,7 @@ var _required_rejected := {}
 var _discovered := {}
 var _discovered_loaded := false
 var _last_game := ""
+var _last_titles: Array = []
 var _rng := RandomNumberGenerator.new()
 
 signal _tools_done
@@ -91,6 +97,7 @@ func setup(config: FiloConfig, nim_client: NimClient, claude_client: ClaudeClien
 	warmup_probe = bool(cfg.get_value("research.warmup_probe", true))
 	wikis = normalize_wikis(cfg.get_value("research.wikis", {}))
 	force_first_tool = str(cfg.get_value("research.force_first_tool", "required")).to_lower()
+	prefetch = bool(cfg.get_value("research.prefetch", true))
 	models = normalize_models(cfg.get_value("research.models", []))
 	if not transport.is_valid():
 		transport = _default_transport
@@ -171,6 +178,8 @@ func answer(user_content: String, game_name: String, hints: Dictionary = {}) -> 
 		{"role": "user", "content": user_content},
 	]
 	var chain := _available_models()
+	if prefetch and bool(hints.get("force_tool", false)) and force_first_tool != "off" and max_tool_calls >= 1:
+		await _prefetch(messages, stats)
 	for entry in chain:
 		var r: Dictionary = await _run_loop(entry, messages, stats)
 		if r.ok:
@@ -383,12 +392,58 @@ static func _strip_reasoning(messages: Array) -> void:
 			m.erase("reasoning")
 
 
+## Runs the first search (and, for a wiki, reads the best matching page) before any model call and puts the
+## calls + results into the history exactly as if the model had made them (matching tool_call_ids).
+func _prefetch(messages: Array, stats: Dictionary) -> void:
+	var t0 := Time.get_ticks_msec()
+	var first: Array = synthetic_calls(stats.hints)
+	var results: Array = await _run_tools(first, stats)
+	var calls: Array = first.duplicate(true)
+	var tool_messages: Array = results.duplicate(true)
+	var fn: Dictionary = first[0].function
+	if str(fn.name) == "wiki_search" and stats.tool_calls < max_tool_calls:
+		var titles: Array = _last_titles.duplicate()
+		var args: Dictionary = parse_arguments(fn.arguments).args
+		var pick := _pick_prefetch_page(titles, str(args.get("query", "")))
+		if pick != "":
+			var page_call := {"id": "call_prefetch_page_%d" % Time.get_ticks_usec(), "type": "function", "function": {"name": "wiki_page", "arguments": JSON.stringify({"game": str(args.get("game", "")), "title": pick})}}
+			var page_results: Array = await _run_tools([page_call], stats)
+			calls.append(page_call)
+			tool_messages.append_array(page_results)
+	messages.append({"role": "assistant", "content": null, "tool_calls": calls})
+	for m in tool_messages:
+		messages.append(m)
+	stats["prefetched"] = calls.size()
+	var names := PackedStringArray()
+	for c in calls:
+		names.append(str(c.function.name))
+	FiloLog.info("%sPrefetch: %s in %d ms" % [_tag(), ", ".join(names), Time.get_ticks_msec() - t0])
+
+
+## The search hit worth reading right away: the first title that shares a significant word with the query
+## (so an unrelated top hit is not fetched and the model decides instead). "" = none.
+static func _pick_prefetch_page(titles: Array, query: String) -> String:
+	var q := PackedStringArray()
+	for w in QueryRouter.normalize(query).split(" ", false):
+		if w.length() >= 3 and not (w in QueryRouter.STOP_WORDS):
+			q.append(w)
+	if q.is_empty():
+		return str(titles[0]) if not titles.is_empty() else ""
+	for t in titles:
+		var tn := QueryRouter.normalize(str(t))
+		for w in q:
+			if tn.contains(w):
+				return str(t)
+	return ""
+
+
 # --------------------------------------------------------------------- tool loop
 
 ## Executes tool calls concurrently; returns one tool-role message per call, in call order.
 func _run_tools(calls: Array, stats: Dictionary) -> Array:
 	var results := []
 	results.resize(calls.size())
+	_last_titles = []
 	var pending := [calls.size()]
 	var allowed: int = maxi(0, max_tool_calls - int(stats.tool_calls))
 	stats.tool_calls += mini(calls.size(), allowed)
@@ -479,9 +534,12 @@ func _builtin_tool(name: String, args: Dictionary) -> Dictionary:
 				return {"ok": true, "text": "No results. Try different keywords, or web_search."}
 			var lines := PackedStringArray()
 			var i := 1
+			var found_titles := []
 			for h in r.results:
 				lines.append("%d. %s — %s" % [i, h.title, h.snippet] if str(h.snippet) != "" else "%d. %s" % [i, h.title])
+				found_titles.append(str(h.title))
 				i += 1
+			_last_titles = found_titles
 			return {"ok": true, "text": "Results from the %s (use wiki_page with an exact title):\n%s" % [str(site.get("name", "wiki")), "\n".join(lines)]}
 		"wiki_page":
 			var site2: Dictionary = await resolve_site(str(args.get("game", "")))

@@ -30,6 +30,7 @@ func _init() -> void:
 	await test_unknown_game_still_uses_tools()
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
+	await _test_prefetch()
 	_test_speech_terms()
 	print("\n%d passed, %d failed" % [passes, failures])
 	quit(1 if failures > 0 else 0)
@@ -805,7 +806,7 @@ class StubClaude extends ClaudeClient:
 		return reply
 
 
-func _make_pipeline(script: ScriptedModel, wikis = null) -> AnswerPipeline:
+func _make_pipeline(script: ScriptedModel, wikis = null, prefetch: bool = false) -> AnswerPipeline:
 	var cfg := FiloConfig.new()
 	cfg.data = FiloConfig.DEFAULTS.duplicate(true)
 	if wikis != null:
@@ -820,6 +821,7 @@ func _make_pipeline(script: ScriptedModel, wikis = null) -> AnswerPipeline:
 	p.research.claude_fallback = false
 	p.research.discovered_path = ""
 	p.research.warmup_probe = false
+	p.research.prefetch = prefetch   # the forced-call tests below exercise the model-driven path; _test_prefetch covers the default
 	return p
 
 
@@ -1088,3 +1090,86 @@ func _test_speech_terms() -> void:
 	check(TermCorrector.correct("", cd).changes.is_empty() and TermCorrector.correct("Who is Cliff", PackedStringArray()).text == "Who is Cliff", "empty text or no vocabulary changes nothing")
 	check(TermCorrector.skeleton("Kliff") == TermCorrector.skeleton("cliff") and TermCorrector.skeleton("Oongka's") == TermCorrector.skeleton("Unka's"), "the consonant skeleton equates spellings that sound alike")
 	check(is_equal_approx(TermCorrector.wer("how do i beat it", "how do i beat it"), 0.0) and is_equal_approx(TermCorrector.wer("a b c d", "a x c"), 0.5), "word error rate")
+
+
+# ------------------------------------------------------------------ prefetch (workstream 4: speed)
+
+func _test_prefetch() -> void:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	# the default flow: the search and the top page are fetched before the model is asked anything, so one model call answers
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+		return _reply("According to the Terraria wiki, it has two phases: dodge the charges, then kill the servants.")
+	var p := _make_pipeline(s, null, true)
+	var order := []
+	p.research.tool_overrides["wiki_search"] = func(args: Dictionary) -> Dictionary:
+		order.append("wiki_search:" + str(args.query))
+		p.research._last_titles = ["Eye of Cthulhu", "Eye of Cthulhu (Boss)"]
+		return {"ok": true, "text": "1. Eye of Cthulhu\n2. Eye of Cthulhu (Boss)"}
+	p.research.tool_overrides["wiki_page"] = func(args: Dictionary) -> Dictionary:
+		order.append("wiki_page:" + str(args.title))
+		return {"ok": true, "text": "The Eye of Cthulhu has two phases.", "source": {"kind": "web", "title": "Eye of Cthulhu", "url": "https://terraria.wiki.gg/wiki/Eye_of_Cthulhu"}}
+	var r: Dictionary = await p.ask(Q)
+	check(r.ok and order == ["wiki_search:Eye of Cthulhu", "wiki_page:Eye of Cthulhu"], "prefetch: the wiki is searched and the best page read app-side: " + str(order))
+	check(s.calls.size() == 1 and s.calls[0].opts.tool_choice == "auto" and r.timing.rounds == 1 and r.timing.tool_calls == 2, "prefetch: ONE model call answers (rounds %d, tools %d), with every tool still available (%d)" % [r.timing.rounds, r.timing.tool_calls, s.calls[0].tools if not s.calls.is_empty() else -1])
+	var msgs: Array = s.calls[0].messages
+	check(msgs.size() == 5 and msgs[2].role == "assistant" and msgs[2].tool_calls.size() == 2 and msgs[3].role == "tool" and msgs[3].tool_call_id == msgs[2].tool_calls[0].id and msgs[4].tool_call_id == msgs[2].tool_calls[1].id, "prefetch: the history looks exactly like the model made the calls (matching tool_call_ids)")
+	check(msgs[4].content.begins_with("<tool_result name=\"wiki_page\" trust=\"untrusted\">") and r.sources.size() == 1 and r.sources[0].title == "Eye of Cthulhu", "prefetch: results are wrapped as untrusted data and the page becomes the source")
+	p.free()
+
+	# no relevant hit -> only the search is prefetched, the model decides what to read
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+		return _reply("I could not find that.")
+	p = _make_pipeline(s, null, true)
+	var pages := [0]
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Main Page", "Version history"]
+		return {"ok": true, "text": "1. Main Page\n2. Version history"}
+	p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary:
+		pages[0] += 1
+		return {"ok": true, "text": "x"}
+	r = await p.ask(Q)
+	check(r.ok and pages[0] == 0 and s.calls[0].messages[2].tool_calls.size() == 1, "prefetch: an unrelated top hit is not read (%d pages), the model gets the search only" % pages[0])
+	p.free()
+
+	# unknown game (no wiki): the prefetched call is a web search
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+		return _reply("From a guide: fire works well.")
+	p = _make_pipeline(s, {}, true)
+	var web := []
+	p.research.tool_overrides["web_search"] = func(a: Dictionary) -> Dictionary:
+		web.append(a.query)
+		return {"ok": true, "text": "1. Guide\n   https://example.com/g\n   fire"}
+	r = await p.ask(Q)
+	check(r.ok and web.size() == 1 and web[0].contains("Terraria") and s.calls.size() == 1, "prefetch, unknown game: web_search runs first and one model call answers: " + str(web))
+	# the required regression case also under the default (prefetch) configuration
+	check(r.route == "tool_loop" and r.timing.tool_calls >= 1 and r.text != "", "prefetch: How do I beat the Eye of Cthulhu in Terraria still ends in a tool call and a spoken answer")
+	p.free()
+
+	# the model may still call more tools after the prefetch
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, n: int) -> Dictionary:
+		return _tool_reply([["wiki_page", '{"game": "Terraria", "title": "Second Page"}', "more1"]]) if n == 1 else _reply("Now I know.")
+	p = _make_pipeline(s, null, true)
+	var reads := []
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Eye of Cthulhu"]
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	p.research.tool_overrides["wiki_page"] = func(a: Dictionary) -> Dictionary:
+		reads.append(a.title)
+		return {"ok": true, "text": "page"}
+	r = await p.ask(Q)
+	check(r.ok and reads == ["Eye of Cthulhu", "Second Page"] and s.calls.size() == 2 and r.timing.tool_calls == 3, "prefetch: the model can still read another page: " + str(reads))
+	p.free()
+
+	# a failing prefetch never blocks the answer
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+		return _reply("I could not reach the wiki, so I cannot confirm.")
+	p = _make_pipeline(s, null, true)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": false, "text": "Error: wiki search failed (HTTP 503)."}
+	r = await p.ask(Q)
+	check(r.ok and r.text.contains("could not reach") and s.calls.size() == 1 and s.calls[0].messages[3].content.contains("wiki search failed"), "prefetch: a failed search is passed to the model as an error and the answer is still spoken")
+	p.free()
