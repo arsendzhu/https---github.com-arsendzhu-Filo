@@ -20,6 +20,12 @@ struct Options {
     var muteKey = ""             // empty = no mute hotkey
     var muteMods: [String] = []
     var parentPid: Int32 = 0     // Filo's own process, never treated as "the game" when giving focus back
+    var preRollMs: Double = 450  // audio kept from before the key press / the wake phrase
+    var hangoverMs: Double = 900 // silence that ends a question
+    var pttTailMs: Double = 300  // recording continues this long after the push-to-talk key is released
+    var keepWarm = true          // keep the microphone engine running (only while the wake word is on) so the pre-roll exists
+    var debugAudioDir = ""       // non-empty: save every captured utterance here (last N kept)
+    var debugAudioKeep = 20
 }
 
 func parseOptions() -> Options {
@@ -51,6 +57,12 @@ func parseOptions() -> Options {
                 o.muteMods = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             }
         case "--parent-pid": if let v = next(), let p = Int32(v) { o.parentPid = p }
+        case "--preroll-ms": if let v = next(), let d = Double(v) { o.preRollMs = max(0, min(2000, d)) }
+        case "--hangover-ms": if let v = next(), let d = Double(v) { o.hangoverMs = max(300, min(3000, d)) }
+        case "--ptt-tail-ms": if let v = next(), let d = Double(v) { o.pttTailMs = max(0, min(1500, d)) }
+        case "--no-keep-warm": o.keepWarm = false
+        case "--debug-audio-dir": if let v = next() { o.debugAudioDir = v }
+        case "--debug-audio-keep": if let v = next(), let n = Int(v) { o.debugAudioKeep = max(1, n) }
         default: break   // ignore LaunchServices args such as -psn_...
         }
         i += 1

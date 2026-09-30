@@ -13,3 +13,5 @@ tts/models/
 logs/
 __pycache__/
 .pytest_cache/
+stt/venv/
+stt/models/

@@ -62,6 +62,8 @@ var mic_mute_confirmed := false # the helper acknowledged the last set_mute
 var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
 var _mute_deadline := 0.0
 var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _vocab_table: Dictionary = {}
+var _vocab_sent := ""
 var _speech_kind := ""          # answer | reprompt | farewell | info
 var _rng := RandomNumberGenerator.new()
 
@@ -261,9 +263,39 @@ func _start_helper() -> void:
 
 func _helper_extra_flags() -> PackedStringArray:
 	var flags := PackedStringArray(["--parent-pid", str(OS.get_process_id())])
+	flags.append_array(PackedStringArray(["--preroll-ms", str(cfg.get_value("speech.preroll_ms", 450)), "--hangover-ms", str(cfg.get_value("speech.hangover_ms", 900)),
+		"--ptt-tail-ms", str(cfg.get_value("speech.ptt_tail_ms", 300))]))
+	if str(cfg.get_value("speech.keep_mic_warm", "auto")).to_lower() == "off":
+		flags.append("--no-keep-warm")
+	if bool(cfg.get_value("debug.save_audio", false)):
+		flags.append_array(PackedStringArray(["--debug-audio-dir", cfg.resolve_path(str(cfg.get_value("debug.audio_dir", "logs/audio"))), "--debug-audio-keep", str(cfg.get_value("debug.audio_keep", 20))]))
 	if _mute_hotkey_enabled():
 		flags.append_array(PackedStringArray(["--mute-key", str(cfg.get_value("hotkey_mute.key", "m")), "--mute-mods", ",".join(PackedStringArray(cfg.get_value("hotkey_mute.modifiers", [])))]))
 	return flags
+
+
+## Game words for the recogniser (hints) and for TermCorrector; resent whenever the game changes.
+func _current_game_name() -> String:
+	if pipeline != null and pipeline.session.game != "":
+		return pipeline.session.game
+	return profile.name if profile != null else ""
+
+
+func _vocabulary() -> PackedStringArray:
+	if _vocab_table.is_empty():
+		_vocab_table = SpeechVocabulary.load_table(profiles_dir)
+	return SpeechVocabulary.for_game(_vocab_table, _current_game_name(), profile, cfg.get_value("speech.hotwords", null))
+
+
+func _send_vocabulary() -> void:
+	var words := _vocabulary()
+	var key := "|".join(words)
+	if key == _vocab_sent:
+		return
+	_vocab_sent = key
+	if bridge != null and helper_connected:
+		bridge.send({"cmd": "set_vocab", "words": Array(words)})
+		FiloLog.debug("Sent %d vocabulary hints for '%s'" % [words.size(), _current_game_name()])
 
 
 func _mute_hotkey_enabled() -> bool:
@@ -276,6 +308,7 @@ func _on_helper_connected() -> void:
 	apps_timer.start(5.0)
 	if mic_muted:
 		bridge.send({"cmd": "set_mute", "muted": true})
+	_send_vocabulary()
 
 
 func _on_helper_disconnected() -> void:
@@ -501,6 +534,11 @@ func _handle_final(text: String) -> void:
 			bubble.show_info("I didn't catch that — %s." % ("say “%s” again or hold %s" % [str(cfg.get_value("wake_word.phrase", "hey filo")), cfg.hotkey_label()] if _wake_enabled() else "hold %s and try again" % cfg.hotkey_label()))
 			_set_state(AppState.IDLE)
 		return
+	if bool(cfg.get_value("speech.term_correction", true)):
+		var fixed := TermCorrector.correct(q, _vocabulary())
+		if not fixed.changes.is_empty():
+			FiloLog.info("Term correction: %s  (\"%s\" -> \"%s\")" % [str(fixed.changes), q, fixed.text])
+			q = fixed.text
 	mascot.animator.nod()
 	_ask(q)
 
@@ -609,6 +647,7 @@ func _ask(question: String, source: String = "voice") -> void:
 	for s in result.sources:
 		FiloLog.info("SOURCE: %s — %s" % [s.title, s.url])
 	mascot.animator.register_turn()
+	_send_vocabulary()
 	_had_first_answer = true
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))

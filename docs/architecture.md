@@ -100,8 +100,29 @@ App → helper: `ping`, `list_apps`, `wake_pause`, `wake_resume`, `set_wake{enab
 `listen_open{timeout_ms}` (capture the next utterance without a wake phrase, after "anything
 else?"), `listen_stop`, `set_mute{muted}` (microphone off/on, acknowledged with `mute_state`),
 `focus_save` / `focus_restore` (remember the frontmost app before the typed box takes the keyboard,
-give it back afterwards), `quit`, `simulate_hotkey{pressed}` (test hook). New helper launch flags:
-`--mute-key`, `--mute-mods`, `--parent-pid`.
+give it back afterwards), `set_vocab{words}` (game terms handed to the recogniser as hints), `quit`, `simulate_hotkey{pressed}` (test hook). New helper launch flags:
+`--mute-key`, `--mute-mods`, `--parent-pid`, `--preroll-ms`, `--hangover-ms`, `--ptt-tail-ms`,
+`--no-keep-warm`, `--debug-audio-dir`, `--debug-audio-keep`.
+
+### Audio capture (helper)
+
+`AudioTapCore` receives every microphone buffer on the audio thread and does almost nothing there: one copy of
+channel 0 into a ring of the last `preroll_ms`, the consumers' cheap `request.append`, and everything else
+(level meter, VAD, debug dump) handed to a serial queue. A consumer that registers with `preRoll: true` first gets
+the ring's contents, then live audio, strictly in order and never twice (sequence numbers under one lock; a test
+races 60 joins against a delivering thread). `AudioSource` owns the engine: it idles *warm* only while the wake
+word keeps the microphone on anyway, and is stopped (ring dropped) while Filo speaks - so it never replays its own
+voice - and while muted.
+
+- Push-to-talk (`SpeechCapture`): pre-roll replayed at the key press; recording continues `ptt_tail_ms` after the release.
+- Wake listener: the pre-roll is replayed when a session restarts (every 55 s, after each question), so words spoken
+  in the restart gap are kept; it is cleared after a finished question or "bye" so a restarted session cannot hear it again.
+- End of question: `Endpointing.questionIsOver` = VAD silence >= `hangover_ms` and a transcript unchanged for 0.7 s;
+  a transcript ending on a dangling word ("... how do I beat the") gets extra time; the old 1.5 s transcript-only rule
+  remains the fallback when the VAD has heard nothing.
+- `UtteranceSegmenter` (pure Swift, `AudioSegmenter.swift`): energy VAD with an adaptive noise floor, onset debounce,
+  hysteresis, a steady-noise guard (a fan switching on is not speech), pre-roll, hangover, push-to-talk boundaries.
+- Recogniser hints: `contextualStrings` = the wake phrase + the current game's vocabulary (`set_vocab`).
 
 ### Inside the helper
 

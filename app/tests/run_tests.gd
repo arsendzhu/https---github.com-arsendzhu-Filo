@@ -30,6 +30,7 @@ func _init() -> void:
 	await test_unknown_game_still_uses_tools()
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
+	_test_speech_terms()
 	print("\n%d passed, %d failed" % [passes, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -1041,3 +1042,49 @@ func test_followup_uses_session_context() -> void:
 	for i in 4:
 		sm.note_turn("q%d" % i, "a%d" % i, "topic%d" % i)
 	check(sm.turns.size() == 2 and sm.turns[0].q == "q2" and sm.last_topic() == "topic3", "the session keeps only the last few turns")
+
+
+# ------------------------------------------------------------ speech vocabulary + term correction (workstream 3)
+
+func _test_speech_terms() -> void:
+	var table := SpeechVocabulary.load_table(FiloConfig.project_root().path_join("profiles"))
+	check(table.has("Terraria") and table.has("Crimson Desert") and not table.has("_comment"), "the vocabulary table has the four starter games and skips comments")
+	var prof := GameProfile.load_from(FiloConfig.project_root().path_join("profiles"), "sekiro")
+	var words := SpeechVocabulary.for_game(table, "Sekiro: Shadows Die Twice", prof, {"sekiro": ["Custom Boss"]})
+	check(words.has("Lady Butterfly") and words.has("Custom Boss") and words.has("Terraria") and words.size() <= SpeechVocabulary.MAX_TERMS, "the current game's terms + config hotwords + the other games' names, capped at 100: %d words" % words.size())
+	check(words.find("Sekiro") < words.find("Terraria"), "the current game's terms come first")
+	check(SpeechVocabulary.for_game(table, "Terraria").has("Eye of Cthulhu") and not SpeechVocabulary.for_game(table, "Terraria").has("Lady Butterfly"), "another game's boss names are not hints for this game")
+
+	var cd := PackedStringArray(table["Crimson Desert"])
+	var terraria := PackedStringArray(table["Terraria"])
+	var dark := PackedStringArray(table["Dark Souls"])
+	var sekiro := PackedStringArray(table["Sekiro"])
+	# real mis-hearings recorded from the reference recogniser (scripts/eval_stt.py on the fixtures)
+	var fixes := [
+		["Who is Cliff in Crimson Desert?", cd, "Who is Kliff in Crimson Desert?"],
+		["What weapons can Cliff use?", cd, "What weapons can Kliff use?"],
+		["What is Unka's role in Crimson Desert?", cd, "What is Oongka's role in Crimson Desert?"],
+		["Where do I find the gray mane cam?", cd, "Where do I find the Greymane cam?"],
+		["Where do I find the gray main cam?", cd, "Where do I find the Greymane cam?"],
+		["Where do I find the Lord vessel in dark souls?", dark, "Where do I find the Lordvessel in Dark Souls?"],
+		["Where do I find the Lord Bessel in Dark Souls?", dark, "Where do I find the Lordvessel in Dark Souls?"],
+		["how do I beat the eye of cthulhu in terraria", terraria, "how do I beat the Eye of Cthulhu in Terraria"],
+		["How do I summon Skeletrone", terraria, "How do I summon Skeletron"],
+	]
+	for f in fixes:
+		var r := TermCorrector.correct(f[0], f[1])
+		check(r.text == f[2], "'%s' -> '%s' (got '%s')" % [f[0], f[2], r.text])
+	# ordinary text must never change: lower-case everyday words that sit near a game term, and general questions
+	var untouched := [
+		["Where is the cliff in Crimson Desert?", cd], ["How do I beat the skeleton?", terraria], ["Where is the guide?", terraria],
+		["Talk to the sculptor about it", sekiro], ["What is the best build for a mage?", terraria], ["How do I unlock the second door?", sekiro],
+		["Where do I save my game?", dark], ["What does the golem drop?", terraria], ["Can you repeat that?", cd],
+		["I am stuck on the final boss, what am I missing?", sekiro], ["Is there a way to skip this cutscene?", dark],
+		["How many hours does the campaign take?", cd], ["Which class should I pick first?", dark], ["What should I craft first?", terraria],
+	]
+	for u in untouched:
+		var r2 := TermCorrector.correct(u[0], u[1])
+		check(r2.changes.is_empty() and r2.text == u[0], "no false correction in '%s' (got '%s')" % [u[0], r2.text])
+	check(TermCorrector.correct("", cd).changes.is_empty() and TermCorrector.correct("Who is Cliff", PackedStringArray()).text == "Who is Cliff", "empty text or no vocabulary changes nothing")
+	check(TermCorrector.skeleton("Kliff") == TermCorrector.skeleton("cliff") and TermCorrector.skeleton("Oongka's") == TermCorrector.skeleton("Unka's"), "the consonant skeleton equates spellings that sound alike")
+	check(is_equal_approx(TermCorrector.wer("how do i beat it", "how do i beat it"), 0.0) and is_equal_approx(TermCorrector.wer("a b c d", "a x c"), 0.5), "word error rate")

@@ -68,3 +68,50 @@ While building the UI test (workstream 2) I ran `app/tests/ui_tests.gd` once by 
 ### Cannot verify overnight
 - The real `NSWindow.ignoresMouseEvents` behaviour and a real mouse click (no Accessibility permission, no clicking). Covered by MANUAL_TESTS.md.
 
+## Workstream 3 - speech recognition drops parts of speech
+
+### What the "STT" actually is here
+Apple's on-device `SFSpeechRecognizer` in the Swift helper (not a Python/Whisper model), fed by an `AVAudioEngine` tap. There was no VAD, no ring buffer, no resampling step (the recogniser takes the device format). Requirements phrased for a Python/faster-whisper stack were mapped onto this: pre-roll/hangover/callback discipline went into the Swift helper; faster-whisper is used only as an offline *reference recogniser* in the tests (a dev-only venv, `stt/venv`, gitignored; free, no service). The helper's own recogniser cannot be run from a script overnight: `SFSpeechRecognizer.authorizationStatus()` is "not determined" for a command-line binary and asking would raise a dialog nobody can click, and rebuilding the helper app changes its signature (permission grants are lost). So WER numbers below are for the reference recogniser fed with exactly what the helper's capture code would deliver.
+
+### Root causes (from the code, each reproduced by the fixtures)
+1. **First syllables lost on push-to-talk**: key down -> `wake?.stop()` stops the engine (the last consumer leaves) -> `speech?.start()` -> async permission check -> `begin()` -> the engine cold-starts. ~150-300 ms of audio is never recorded and there is no pre-roll. (Modelled with a 250 ms cold start; the sweep below shows the sensitivity.)
+2. **Last word clipped**: on release `stop()` removed the consumer and called `endAudio()` in the same instant: no tail, so a player who lets go slightly early loses the last syllable.
+3. **Speech between wake-word sessions lost**: sessions restart every 55 s and after each question (0.3 s gap) and the engine stopped in between; words spoken right after "anything else?" hit a cold engine.
+4. **End of question = transcript unchanged for 1.5 s**: slow, and no audio-level information at all.
+5. **Work on the audio callback thread**: the level meter computed and `bridge.send`-ed JSON from the tap callback.
+6. **No vocabulary hints**: game names are mis-heard ("Cliff" for Kliff, "Lord vessel", "Unka's", "gray main").
+Not causes here: sample rate/channel count (the recogniser gets the device format), a small model (see the size comparison).
+
+### Changes (Swift helper unless noted)
+- `AudioTapCore` + `AudioSource`: ring buffer of the last `speech.preroll_ms` (450), in-order/no-duplicate replay into new requests, all heavy work off the audio thread, engine kept warm only while the wake word is on (never while Filo speaks, never while muted; the ring lives in memory only).
+- `SpeechCapture`: pre-roll at the press, `speech.ptt_tail_ms` (300) tail after the release, hint words, per-capture VAD log ("vad speech starts at ...").
+- `WakeListener`: pre-roll across session restarts (cleared after a finished question/"bye" so nothing is heard twice), end of question = VAD silence >= `speech.hangover_ms` (900) AND transcript idle 0.7 s, extra time after a dangling word, old 1.5 s rule as fallback.
+- `AudioSegmenter.swift`: `UtteranceSegmenter` (VAD with adaptive floor, hysteresis, onset debounce, steady-noise guard, pre-roll, hangover, PTT boundaries), `Resampler`, `WavIO`.
+- Debug audio: `debug.save_audio` -> `logs/audio/utt_<time>_<ptt|wake>.wav` (16 kHz mono, newest 20 kept) + log lines with VAD start/end per utterance.
+- GDScript: `SpeechVocabulary` (+ `profiles/vocabulary.json`, `profile.json` `vocabulary`, `speech.hotwords`), `set_vocab` to the helper, `TermCorrector` on voice questions (`speech.term_correction`).
+
+### Measurements (10 phrases x 10 scenarios; faster-whisper base.en int8, beam 5; WER over 10 questions, so +-0.03 is noise)
+| scenario | old capture path (cold start 250 ms, hard stop) | new capture |
+| --- | --- | --- |
+| recogniser on perfectly captured speech (ceiling) | - | 0.155 |
+| ptt, press before speaking | 0.169 | 0.155 |
+| ptt, late press (150 ms after the first syllable) | **0.493** | 0.155 |
+| ptt, early release (100 ms before the end) | 0.197 | 0.155 |
+| ptt, late press + early release | **0.535** | **0.155** |
+| ptt, late + early, noise 15 dB SNR | 0.549 | 0.127 |
+| vad, 0.6 s pause inside the sentence (still one utterance) | - | 0.183 |
+| vad, noise 10 dB / 20 dB | - | 0.127 / 0.141 |
+Old-path WER vs assumed cold-start latency (press 200 ms before speaking): 0 ms 0.127, 100 ms 0.141, 250 ms 0.169, 400 ms 0.338.
+Coverage of the speech interval (deterministic, no recogniser): the new capture keeps >= 99 % in all ten scenarios (`test_speech_not_clipped`); the old path averages < 0.93 in the three clipping scenarios.
+Model size (uncut speech, WER / key-word recall): tiny.en 0.155 / 0.67, base.en 0.155 / 0.67, small.en 0.127 / 0.72 - a bigger model barely helps with names.
+**Hotwords** (per-game vocabulary given to faster-whisper as `hotwords`): uncut WER 0.155 -> **0.000**, key-word recall 0.67 -> 1.00; late+early press: old 0.437 vs new 0.014. Caveat: the vocabulary file contains several fixture terms (Eye of Cthulhu, Skeletron, Guardian Ape ...); this is an upper bound, the real gain depends on how complete `profiles/vocabulary.json` is for the bosses/items people ask about.
+**TermCorrector** on the 100 recorded transcripts (no hotwords, so the recogniser made real mistakes): mean WER 0.153 -> 0.052, key-word recall 0.68 -> 0.88, 61 transcripts changed (53 improved, 0 worse). Caveat: I looked at these transcripts while writing the rules (Cliff/Kliff, Unka's, Lord vessel, gray main), so treat it as optimistic; the false-positive corpus in `_test_speech_terms` (14 ordinary sentences incl. "the cliff", "a skeleton", "the guide") is unchanged. Enabled by default (`speech.term_correction`) because the net effect on measured transcripts is positive and it only touches near-matches of the current game's vocabulary; set it to false to turn it off.
+
+### Tests
+`test_vad_preroll_and_hangover`, `test_speech_not_clipped` (tests/test_speech_pipeline.py, real synthesized speech through the Swift segmenter), `test_segmenter_selftest_on_synthetic_signals` (ring wrap-around, onset, hangover, pauses, noise, clicks, PTT, 48 kHz, 60-race replay-ordering test, endpointing, debug-dump pruning), `test_keywords_recovered_by_reference_recognizer` (end to end with faster-whisper), `_test_speech_terms` (vocabulary + corrector) in the Godot suite.
+
+### Not done / decisions
+- Hosted ASR (NVIDIA Riva/Parakeet): needs gRPC streaming and its free-tier terms/scopes for the existing key could not be verified offline; not added.
+- AI (NIM) post-correction of transcripts: not implemented. It would need a live benchmark to justify enabling and none is possible overnight without the key; the rule-based corrector covers the measured cases at zero latency.
+- The installed helper app was **not** rebuilt (see MANUAL_TESTS.md step 0) and the microphone path has never run against real audio tonight: everything above is verified on synthetic/synthesized audio, compile checks and unit tests. MANUAL_TESTS.md section 3 says what to check with your voice.
+

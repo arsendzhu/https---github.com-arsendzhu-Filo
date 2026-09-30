@@ -131,6 +131,10 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `behavior.reprompt_phrases`, `behavior.farewell_phrases` | lists | what Filo says after an answer / on "bye filo" |
 | `wake_word.enabled`, `wake_word.phrase`, `wake_word.bye_phrase`, `wake_word.silence_ms` | true, `hey filo`, `bye filo`, 1500 | always-on wake word, the goodbye phrase, the pause that ends a question |
 | `hotkey.key`, `hotkey.modifiers` | `space`, `["option"]` | push-to-talk key |
+| `speech.preroll_ms`, `speech.hangover_ms`, `speech.ptt_tail_ms` | 450, 900, 300 | audio kept from before the key press / wake phrase, silence that ends a question, how long push-to-talk keeps recording after the key is released |
+| `speech.keep_mic_warm` | `auto` | keep the microphone engine running so the pre-roll exists (only while the wake word is on, never while Filo talks or the mic is muted); `off` = cold start on every press |
+| `speech.hotwords`, `speech.term_correction` | `{}`, true | extra recogniser hints per game (`{"terraria": ["Skeletron"]}`), on top of `profiles/vocabulary.json`; repair mis-heard game terms in the transcript |
+| `debug.save_audio`, `debug.audio_dir`, `debug.audio_keep` | false, `logs/audio`, 20 | save every captured utterance as a 16 kHz WAV (newest 20 kept) and log the VAD start/end times, to listen to what the microphone really delivered |
 | `hotkey_mute.key`, `hotkey_mute.modifiers` | `m`, `["control", "option"]` | microphone mute hotkey (backup for the mute button); empty key = off |
 | `default_profile`, `profiles_dir` | `sekiro`, `profiles` | which game's notes to load; a running game switches profiles by app name |
 | `helper.path`, `helper.port`, `helper.allow_server_speech`, `helper.locale` | … | native helper settings |
@@ -156,6 +160,15 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 Run-time flags after `--`: `--showcase`, `--ask "question"`, `--mute`, `--no-helper`,
 `--no-greet`, `--capture-dir DIR`, `--quit-after N`, `--profile ID`, `--verbose`,
 `--list-voices`, `--test-hotkey`.
+
+## Speech recognition and its tests
+
+The helper keeps the last ~450 ms of microphone audio in memory (never on disk unless `debug.save_audio` is on) and replays it into every new recognition request, so the first syllables are never lost; push-to-talk keeps recording 300 ms after the key is released; a question ends after ~0.9 s of *measured* silence (longer when the sentence stops on a word like "the"); the recogniser gets the current game's boss/item names as hints (`profiles/vocabulary.json`, add a game with one line) and mis-heard names are repaired afterwards (`TermCorrector`).
+
+- `scripts/test_audio.sh` - compiles the helper and runs the segmenter/pre-roll/endpointing self-tests (no microphone needed).
+- `.venv/bin/python -m pytest` - the speech-fixture tests (`tests/test_speech_pipeline.py`): questions about Terraria, Sekiro, Dark Souls and Crimson Desert are synthesized with the Kokoro voice (`scripts/gen_speech_fixtures.py`, needs `tts/`), turned into ten scenarios (late key press, early release, pauses, noise at 10-20 dB) and pushed through the same segmenter code the helper runs. One test also runs an offline reference recogniser (faster-whisper, dev-only: `python3 -m venv stt/venv && stt/venv/bin/pip install faster-whisper numpy jiwer`).
+- `stt/venv/bin/python scripts/eval_stt.py --models base.en --hotwords` - word error rate before/after for any scenario; `godot --headless --path app -s tests/term_correction_eval.gd` - the corrector on those transcripts.
+- Hearing what the microphone delivered: set `"debug": {"save_audio": true}`, ask something, open `logs/audio/`.
 
 ## Layout
 

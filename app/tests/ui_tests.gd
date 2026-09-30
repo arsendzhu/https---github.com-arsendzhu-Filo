@@ -200,7 +200,8 @@ func _test_typing_over_ipc() -> void:
 	await _wait_for(func() -> bool: return main.app_state != main.AppState.THINKING, 10.0)
 	main.app_state = main.AppState.LISTENING
 	main._on_final("who is lady butterfly")
-	check(asked.size() == 2 and asked[1] == ["who is lady butterfly", "voice"], "the same question said aloud takes the same _ask() path: " + str(asked))
+	# (voice questions pass through TermCorrector first, which re-cases the boss name: compare case-insensitively)
+	check(asked.size() == 2 and str(asked[1][0]).to_lower() == "who is lady butterfly" and asked[1][1] == "voice", "the same question said aloud takes the same _ask() path: " + str(asked))
 
 
 func _test_control_bar_without_main() -> void:

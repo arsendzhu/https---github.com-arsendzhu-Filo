@@ -1,14 +1,17 @@
+import AVFoundation
 import Cocoa
 
 final class HelperController {
     let options: Options
     let bridge: Bridge
-    private let audio = AudioSource()
+    private let audio: AudioSource
+    private let settings = CaptureSettings()
     private var hotKey: HotKey?
     private var speech: SpeechCapture?
     private var wake: WakeListener?
     private var muteHotKey: HotKey?
     private var micMuted = false
+    private var filoSpeaking = false
     private var frontApp: NSRunningApplication?    // the last app that was in front and is not Filo (the game)
     private var savedFront: NSRunningApplication?  // what focus_save recorded, given back by focus_restore
     private var keyDown = false
@@ -18,6 +21,15 @@ final class HelperController {
     init(options: Options) {
         self.options = options
         self.bridge = Bridge(port: options.port)
+        self.audio = AudioSource(preRollMs: options.preRollMs)
+        settings.pttTailMs = options.pttTailMs
+        settings.hangoverMs = options.hangoverMs
+        settings.debugAudioDir = options.debugAudioDir
+        settings.debugAudioKeep = options.debugAudioKeep
+        if !options.debugAudioDir.isEmpty {
+            AudioDump.shared = AudioDump(path: options.debugAudioDir, keep: options.debugAudioKeep)
+            Log.info("debug audio dump ON: \(options.debugAudioDir) (newest \(options.debugAudioKeep) kept)")
+        }
     }
 
     func start() {
@@ -38,7 +50,7 @@ final class HelperController {
             self.setupMuteHotkey()
             self.trackFrontApp()
             if !self.options.noSpeech {
-                let speech = SpeechCapture(localeId: self.options.locale, allowServer: self.options.allowServerSpeech, audio: self.audio) { [weak self] in
+                let speech = SpeechCapture(localeId: self.options.locale, allowServer: self.options.allowServerSpeech, audio: self.audio, settings: self.settings) { [weak self] in
                     self?.bridge.send($0)
                 }
                 speech.onIdle = { [weak self] in self?.wake?.start() }
@@ -46,13 +58,14 @@ final class HelperController {
                 let wake = WakeListener(phrase: self.options.wakePhrase.isEmpty ? "hey filo" : self.options.wakePhrase,
                                         silenceMs: self.options.wakeSilenceMs,
                                         localeId: self.options.locale, allowServer: self.options.allowServerSpeech,
-                                        audio: self.audio) { [weak self] in self?.bridge.send($0) }
+                                        audio: self.audio, settings: self.settings) { [weak self] in self?.bridge.send($0) }
                 wake.detectWake = !self.options.wakePhrase.isEmpty
                 self.wake = wake
                 if wake.detectWake {
                     wake.start()
                     Log.info("wake word listening for '\(wake.phrase)'")
                 }
+                self.enableWarmIfPossible()
             }
             self.sendReady()
             self.sendApps()
@@ -74,6 +87,14 @@ final class HelperController {
         } else {
             Log.info("hotkey registered: \(hotkeyLabel())")
         }
+    }
+
+    /// The microphone engine may idle "warm" (so the last ~450 ms of audio is always buffered) only while the
+    /// wake word keeps it on anyway, the user has not muted, and Filo is not speaking (it must never hear itself).
+    private func enableWarmIfPossible() {
+        let allowed = options.keepWarm && (wake?.detectWake ?? false) && !micMuted && !filoSpeaking
+            && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        audio.setKeepWarm(allowed)
     }
 
     /// Backup for the mute button: toggles the microphone from anywhere, even with the overlay unclickable.
@@ -99,8 +120,11 @@ final class HelperController {
         if muted {
             speech?.cancel()
             wake?.stop()
+            audio.suspend()          // engine off and the buffered audio dropped: nothing is kept while muted
         } else {
+            audio.resume()
             wake?.start()
+            enableWarmIfPossible()
         }
         Log.info("microphone \(muted ? "muted" : "unmuted") (\(source))")
         bridge.send(["event": "mute_state", "muted": muted, "source": source])
@@ -196,9 +220,19 @@ final class HelperController {
             // left running would otherwise keep transcribing Filo's own
             // voice the whole time it talks. wake_resume starts a clean,
             // fresh session right after, which is simple and race-free.
+            filoSpeaking = true
+            audio.setKeepWarm(false)
+            audio.clearPreRoll()      // never replay Filo's own voice into the next request
             wake?.stop()
         case "wake_resume":
+            filoSpeaking = false
             wake?.start()
+            enableWarmIfPossible()
+        case "set_vocab":
+            if let words = dict["words"] as? [String] {
+                settings.vocabulary = Array(words.filter { !$0.isEmpty }.prefix(100))
+                Log.info("vocabulary hints: \(settings.vocabulary.count) words")
+            }
         case "listen_open":
             let ms = (dict["timeout_ms"] as? Int) ?? (Int((dict["timeout_ms"] as? Double) ?? 30000))
             if let wake = wake {

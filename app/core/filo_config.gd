@@ -93,6 +93,13 @@ const DEFAULTS := {
 	},
 	"screen_reading": {"enabled": false},
 	"session": {"idle_reset_seconds": 900},
+	# Speech capture (helper): audio kept from before the key press / wake phrase, the silence that ends a
+	# question, how long push-to-talk keeps recording after the key is released. `hotwords`: extra recogniser
+	# hints per game ({"game": ["term", ...]}), on top of profiles/vocabulary.json. `term_correction` repairs
+	# mis-heard game terms in the transcript. `keep_mic_warm`: auto = only while the wake word is on.
+	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true},
+	# Debug: save every captured utterance (16 kHz WAV, newest 20 kept) so the raw audio can be listened to.
+	"debug": {"save_audio": false, "audio_dir": "logs/audio", "audio_keep": 20},
 	"verbose": false,
 }
 
