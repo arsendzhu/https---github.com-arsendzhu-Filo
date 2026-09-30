@@ -51,6 +51,30 @@ static func apply_scale(window: Window, cfg: FiloConfig, scale: float) -> Dictio
 	return {"scale": scale, "size_px": size_px, "size_pts": Vector2(w_pts, h_pts)}
 
 
+## Where a dragged window ends up: snapped to the nearest screen corner when it is within `threshold_px` of one,
+## otherwise kept where it is (clamped on screen) and remembered as an offset from the nearest corner.
+## {corner, offset (points), pos (px), snapped}
+static func snap_position(pos: Vector2i, size_px: Vector2i, usable: Rect2i, margin_px: int, threshold_px: int, scale: float) -> Dictionary:
+	var anchors := {
+		"top_left": Vector2i(usable.position.x + margin_px, usable.position.y + margin_px),
+		"top_right": Vector2i(usable.end.x - size_px.x - margin_px, usable.position.y + margin_px),
+		"bottom_left": Vector2i(usable.position.x + margin_px, usable.end.y - size_px.y - margin_px),
+		"bottom_right": Vector2i(usable.end.x - size_px.x - margin_px, usable.end.y - size_px.y - margin_px),
+	}
+	var best := "bottom_right"
+	var best_d := INF
+	for k in anchors:
+		var d := Vector2(pos - anchors[k]).length()
+		if d < best_d:
+			best_d = d
+			best = k
+	if best_d <= float(threshold_px):
+		return {"corner": best, "offset": [0.0, 0.0], "pos": anchors[best], "snapped": true}
+	var clamped := clamp_to_screen(pos, size_px, usable)
+	var off := Vector2(clamped - anchors[best]) / maxf(scale, 0.01)
+	return {"corner": best, "offset": [off.x, off.y], "pos": clamped, "snapped": false}
+
+
 ## Keeps the window (at least mostly) on the screen after a saved offset or a display change.
 static func clamp_to_screen(pos: Vector2i, size_px: Vector2i, usable: Rect2i) -> Vector2i:
 	if usable.size.x <= 0 or usable.size.y <= 0:

@@ -64,6 +64,10 @@ var mic_mute_confirmed := false # the helper acknowledged the last set_mute
 var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
 var _mute_deadline := 0.0
 var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _dragging := false            # the window is being dragged by the status grip
+var _drag_mouse0 := Vector2i.ZERO
+var _drag_win0 := Vector2i.ZERO
+var _idle_seconds := 0.0          # for the optional auto-hide of the controls
 var _failure_spoken := {}         # failure kind -> when it was last spoken (no repeating the same complaint)
 var _error_until := 0.0          # seconds (ticks) until which the status shows a problem
 var _heard_until := 0.0          # ...and "Heard you"
@@ -179,6 +183,8 @@ func _build_ui() -> void:
 
 	controls = ControlBar.new()
 	add_child(controls)
+	controls.status.drag_started.connect(func() -> void: _begin_drag(DisplayServer.mouse_get_position()))
+	controls.status.drag_ended.connect(_end_drag)
 
 	hint = Label.new()
 	hint.name = "Hint"
@@ -215,7 +221,7 @@ func _make_timer(timer_name: String, one_shot: bool, cb: Callable) -> Timer:
 	return t
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	var center := mascot.position + mascot.cube_center_local()
 	var right := mascot.position.x + mascot.display_pts * 0.17
 	var bottom := center.y + mascot.display_pts * 0.2
@@ -229,7 +235,13 @@ func _process(_delta: float) -> void:
 	bubble.tail_target_y = center.y
 	_sync_scale()
 	_layout_controls()
+	if _dragging:
+		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			_move_drag(DisplayServer.mouse_get_position())
+		else:
+			_end_drag()          # the release happened while the window was click-through
 	_apply_window_mode()
+	_update_auto_hide(delta)
 	controls.status.set_kind(_status_kind())
 	if _mute_deadline > 0.0 and Time.get_ticks_msec() / 1000.0 > _mute_deadline:
 		_mute_deadline = 0.0
@@ -325,6 +337,55 @@ func _save_setting(key: String, value) -> void:
 		return
 	if settings.set_value(key, value):
 		settings.save()
+
+
+# ---------------------------------------------------------------- drag, snap, auto-hide
+
+func _begin_drag(mouse: Vector2i) -> void:
+	_dragging = true
+	_drag_mouse0 = mouse
+	_drag_win0 = get_window().position
+
+
+func _move_drag(mouse: Vector2i) -> void:
+	if _dragging:
+		get_window().position = _drag_win0 + (mouse - _drag_mouse0)
+
+
+## Released: snap to a corner when close to one, otherwise stay and remember the offset; persist either way.
+func _end_drag() -> void:
+	if not _dragging:
+		return
+	_dragging = false
+	var window := get_window()
+	var screen := DisplayServer.window_get_current_screen()
+	var usable := DisplayServer.screen_get_usable_rect(screen)
+	var scale := float(win_info.scale)
+	var margin := roundi(float(cfg.get_value("overlay.margin", 24)) * scale)
+	var snap := OverlayWindow.snap_position(window.position, window.size, usable, margin, roundi(90.0 * scale), scale)
+	window.position = snap.pos
+	cfg.data["overlay"]["corner"] = snap.corner
+	cfg.data["overlay"]["offset"] = snap.offset
+	_save_setting("overlay_corner", snap.corner)
+	_save_setting("overlay_offset", snap.offset)
+	FiloLog.info("Overlay moved: %s%s" % [snap.corner, "" if snap.snapped else " (offset %d, %d pt)" % [int(snap.offset[0]), int(snap.offset[1])]])
+
+
+## 1.0 while active or hovered; after `hide_after` idle seconds the controls fade out over a second (0 = never hide).
+static func auto_hide_alpha(idle_seconds: float, hide_after: float, hovering: bool) -> float:
+	if hide_after <= 0.0 or hovering or idle_seconds < hide_after:
+		return 1.0
+	return clampf(1.0 - (idle_seconds - hide_after), 0.0, 1.0)
+
+
+func _update_auto_hide(delta: float) -> void:
+	var hide_after := float(settings.get_value("auto_hide_seconds")) if settings != null else 0.0
+	var hovering: bool = not bool(window_state.passthrough)
+	if app_state in [AppState.ASLEEP, AppState.IDLE] and not hovering and not _dragging:
+		_idle_seconds += delta
+	else:
+		_idle_seconds = 0.0
+	controls.modulate.a = controls.rest_alpha * auto_hide_alpha(_idle_seconds, hide_after, hovering)
 
 
 ## Applies the user settings that can change while running (opacity, captions, accessibility, volume, corner).
@@ -1203,17 +1264,18 @@ func interactive_rects() -> Array:
 func _apply_window_mode() -> void:
 	var window := get_window()
 	var typing := input_panel != null and input_panel.is_open()
-	var whole := _fallback_interactive or typing
+	var whole := _fallback_interactive or typing or _dragging       # a drag keeps the window clickable so the release arrives
+	var focusable := _fallback_interactive or typing                # ...but only typing (or the no-helper fallback) may take the keyboard
 	var want_pass := false
 	if not whole:
 		want_pass = ClickRegion.passthrough_at(Vector2(DisplayServer.mouse_get_position()), Vector2(window.position), float(win_info.scale), interactive_rects())
-	window_state = {"passthrough": want_pass, "unfocusable": not whole}   # what we ask the OS for (tests read this)
+	window_state = {"passthrough": want_pass, "unfocusable": not focusable}   # what we ask the OS for (tests read this)
 	if window.mouse_passthrough_polygon.size() > 0:
 		window.mouse_passthrough_polygon = PackedVector2Array()
 	if window.mouse_passthrough != want_pass:
 		window.mouse_passthrough = want_pass
-	if window.unfocusable != (not whole):
-		window.unfocusable = not whole
+	if window.unfocusable != (not focusable):
+		window.unfocusable = not focusable
 
 
 ## A rect as a 4-point clockwise polygon in window-local points. The window no longer uses

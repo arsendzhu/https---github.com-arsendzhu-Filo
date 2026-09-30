@@ -50,6 +50,7 @@ func _run() -> void:
 	await test_barge_in_stops_tts()
 	await _test_failures_are_spoken_and_shown()
 	_test_settings_commands_apply_live()
+	_test_drag_and_auto_hide()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -338,3 +339,31 @@ func _test_settings_commands_apply_live() -> void:
 	main._on_typed_submitted("/contrast off")
 	main._on_typed_submitted("/spoilers hint")
 	check(is_equal_approx(main.modulate.a, 1.0) and not main.bubble.high_contrast, "and back")
+
+
+func _test_drag_and_auto_hide() -> void:
+	var window := main.get_window()
+	var start := window.position
+	main._begin_drag(Vector2i(100, 100))
+	check(main._dragging, "a drag started from the status grip")
+	main._apply_window_mode()
+	check(main._dragging and main.window_state.passthrough == false and main.window_state.unfocusable, "while dragging the window stays clickable (so the release arrives) but never takes focus")
+	main._move_drag(Vector2i(160, 130))
+	check(window.position == start + Vector2i(60, 30), "the window follows the mouse by the same distance: %s -> %s" % [str(start), str(window.position)])
+	main._end_drag()
+	check(not main._dragging and main.settings.get_value("overlay_corner") in ["top_left", "top_right", "bottom_left", "bottom_right"], "releasing ends the drag and saves where Filo is (%s)" % str(main.settings.get_value("overlay_corner")))
+	main._end_drag()
+	check(not main._dragging, "ending a drag twice is harmless")
+	# auto-hide fades the controls after the idle time and any hover brings them back
+	main.settings.set_value("auto_hide_seconds", 5)
+	main.app_state = main.AppState.IDLE
+	main.window_state = {"passthrough": true, "unfocusable": true}
+	main._idle_seconds = 0.0
+	main._update_auto_hide(6.0)
+	check(main.controls.modulate.a < main.controls.rest_alpha * 0.5, "after the idle time the controls fade out (alpha %.2f)" % main.controls.modulate.a)
+	main.window_state = {"passthrough": false, "unfocusable": true}      # the cursor is over the bar
+	main._update_auto_hide(0.016)
+	check(is_equal_approx(main.controls.modulate.a, main.controls.rest_alpha) and main._idle_seconds == 0.0, "hovering the bar brings them straight back")
+	main.settings.set_value("auto_hide_seconds", 0)
+	main._update_auto_hide(100.0)
+	check(is_equal_approx(main.controls.modulate.a, main.controls.rest_alpha), "auto-hide off: always visible")

@@ -16,16 +16,21 @@ const STATES := {
 }
 const TEXT := Color("d9cfc2")
 
+signal drag_started
+signal drag_ended
+
 var kind := "ready"
 var _t := 0.0
+var dragging := false
 
 
 func _ready() -> void:
 	name = "StatusPill"
-	mouse_filter = Control.MOUSE_FILTER_IGNORE      # a label, not a control: never eats clicks
+	mouse_filter = Control.MOUSE_FILTER_STOP        # the grip: press and drag to move Filo (it sits inside the clickable bar)
+	mouse_default_cursor_shape = Control.CURSOR_MOVE
 	custom_minimum_size = Vector2(92.0, 24.0)
 	size = custom_minimum_size
-	tooltip_text = ""
+	tooltip_text = "Drag to move Filo"
 
 
 ## The kind for the app's situation (pure, so it can be tested without a scene).
@@ -47,6 +52,18 @@ static func kind_for(state_name: String, mic_muted: bool, error_recent: bool, he
 			return "typing"
 		_:
 			return "ready"
+
+
+func _gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed and not dragging:
+			dragging = true
+			accept_event()
+			drag_started.emit()
+		elif not event.pressed and dragging:
+			dragging = false
+			accept_event()
+			drag_ended.emit()
 
 
 func set_kind(k: String) -> void:
