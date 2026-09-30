@@ -11,6 +11,8 @@ var retriever := Retriever.new()
 var claude: ClaudeClient
 var nim: NimClient
 var wikipedia: WikipediaClient
+var web_tools: WebTools
+var research: ResearchAgent
 var provider := "none"                 # anthropic | nim | none
 var history: Array = []                # [{q, a}], most recent last
 var max_history := 4
@@ -31,16 +33,31 @@ func setup(config: FiloConfig, game_profile: GameProfile) -> void:
 		wikipedia = WikipediaClient.new()
 		wikipedia.name = "WikipediaClient"
 		add_child(wikipedia)
+	if web_tools == null:
+		web_tools = WebTools.new()
+		web_tools.name = "WebTools"
+		add_child(web_tools)
+	if research == null:
+		research = ResearchAgent.new()
+		research.name = "ResearchAgent"
+		add_child(research)
 	claude.configure(cfg)
 	nim.configure(cfg)
 	wikipedia.configure(cfg)
+	web_tools.configure(cfg, wikipedia)
+	research.setup(cfg, nim, claude, wikipedia, web_tools)
 	provider = cfg.provider()
 	max_history = maxi(0, int(cfg.get_value("behavior.conversation_turns", 4)))
 	set_profile(game_profile)
+	if research.is_available():
+		FiloLog.info("Research (tool-calling) chain: " + research.chain_label())
+		research.call_deferred("startup")   # async model check + warm-up, never blocks a question
 
 
 func set_profile(game_profile: GameProfile) -> void:
 	profile = game_profile
+	if research != null:
+		research.set_profile(game_profile)
 	retriever.build(profile)
 	FiloLog.info("Profile '%s' (%s): %d notes, %d chunks" % [profile.id, profile.name, profile.notes.size(), retriever.chunks.size()])
 
@@ -93,6 +110,17 @@ func ask(question: String) -> Dictionary:
 	var r := retriever.search(question, 4)
 	var passages: Array = r.results.duplicate()
 	var low_confidence: bool = passages.is_empty() or r.confidence < threshold
+	if low_confidence and research != null and research.is_available():
+		FiloLog.info("Notes confidence %.2f is below %.2f — researching with tools" % [r.confidence, threshold])
+		var rr: Dictionary = await research.answer(user_content(question, passages), profile.name if profile else "")
+		if rr.ok:
+			_remember(question, rr.text)
+			return {
+				"ok": true, "text": rr.text, "spoken": rr.text, "sources": rr.sources, "used_web": true,
+				"confidence": r.confidence, "model": rr.model, "provider": "research",
+				"timing": {"total_ms": rr.total_ms, "first_response_ms": rr.first_response_ms, "model_ms": rr.model_ms, "tool_ms": rr.tool_ms, "rounds": rr.rounds, "tool_calls": rr.tool_calls},
+			}
+		FiloLog.warn("Research failed (%s) — using the standard fallback" % str(rr.error))
 	var web := web_provider()
 	var use_claude_web := web == "anthropic" and low_confidence
 	var wiki_used := false

@@ -12,7 +12,7 @@ cp .env.example .env               # add NVIDIA_API_KEY (or ANTHROPIC_API_KEY)
 scripts/test.sh                    # unit tests + offline end-to-end + showcase captures
 ```
 
-Expected: `304 passed, 0 failed`, only `ok:` lines (no `FAIL:`), `captured 24 review frames`, `ALL TESTS PASSED`.
+Expected: `386 passed, 0 failed`, only `ok:` lines (no `FAIL:`), `captured 24 review frames`, `ALL TESTS PASSED`.
 Optional but recommended: `scripts/setup_voice.sh` (installs the free Kokoro voice, ~340 MB).
 
 ## 1. Launch

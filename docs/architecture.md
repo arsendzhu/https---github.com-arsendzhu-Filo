@@ -25,6 +25,8 @@ repo/
 | Claude client | `app/brain/claude_client.gd` | raw HTTP to `api.anthropic.com/v1/messages` (web search, refusal fallbacks) |
 | NIM client | `app/brain/nim_client.gd` | OpenAI-compatible chat completions on `integrate.api.nvidia.com/v1` |
 | speaker | `app/brain/speaker.gd` | two voices: local Kokoro neural TTS (`tts/kokoro_server.py`, one request for the whole utterance so nothing can gap or stall mid-speech, mouth follows the audio envelope, text reveal follows time) or Godot `DisplayServer` TTS (AVSpeechSynthesizer, word boundaries drive mouth + reveal); `auto` prefers Kokoro when installed. A watchdog in `main.gd` forces completion if a provider ever fails to report back, so the conversation loop can't get stuck |
+| research agent | `app/brain/research_agent.gd` | NIM tool-calling loop (≤4 rounds / ≤6 tools, forced final answer), model chain with circuit breaker, 429 backoff, TTL cache, untrusted-result envelope |
+| web tools | `app/brain/web_tools.gd` | `web_search` (swappable provider, DuckDuckGo) and `fetch_page` with SSRF guard (per-hop IP check, redirect + size caps) |
 | Wikipedia client | `app/brain/wikipedia_client.gd` | free web fallback for non-Claude providers: MediaWiki search + REST page summaries, proper User-Agent |
 | UI | `app/ui/` | bubble (listening / thinking / answer / error / info), the typed-question panel, and the bubble's own sound/mode toggle buttons |
 | controller | `app/main.gd` | the app state machine (below) |
@@ -110,7 +112,7 @@ microphone indicator while the wake word listens), and it exits by itself when t
 ## The answer step
 
 1. `Retriever.search(question)` → top 4 chunks and a confidence in [0, 1].
-2. Low confidence (below `web_search.confidence_threshold`, or no notes matched) → web fallback:
+2. Low confidence with an NVIDIA key → the research agent (above); if the whole chain fails the steps below run as before. Otherwise low confidence (below `web_search.confidence_threshold`, or no notes matched) → web fallback:
    - Claude provider: the `web_search` server tool is attached (max 2 uses).
    - Otherwise (NVIDIA NIM): `WikipediaClient` searches English Wikipedia (MediaWiki search,
      biased with the game name, plain question as a second try), fetches up to two REST page
@@ -128,6 +130,20 @@ microphone indicator while the wake word listens), and it exits by itself when t
 
 Session context (last area / boss / item from screen reading) is a placeholder dictionary in the
 pipeline; Phase 1 fills it.
+
+## The research agent
+
+`AnswerPipeline.ask()` hands low-confidence questions to `ResearchAgent.answer()` (notes are still
+searched first). Each round sends the conversation plus four tool schemas (`wiki_search`,
+`wiki_page`, `web_search`, `fetch_page`) to the first healthy model in `research.models`; tool calls
+in one reply run in parallel and each gets exactly one `tool` message. After 4 rounds or 6 tool
+calls the last request uses `tool_choice: none`. Wiki tools reuse `WikipediaClient` (the same
+MediaWiki API serves Wikipedia and Fandom). Tool results are wrapped in
+`<tool_result trust="untrusted">…</tool_result>`, sanitized and capped, and the system prompt forbids
+following instructions inside them; tools have no side effects beyond HTTP GETs. `reasoning_content`
+is never used as an answer. Chain order: configured NIM models → Claude → the pre-existing
+Wikipedia/notes path. The dict returned to `main.gd` is unchanged, so nothing on the Godot/helper
+boundary moved.
 
 ## What is deliberately not here yet
 

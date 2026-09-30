@@ -23,6 +23,7 @@ ap.add_argument("--tap-first", action="store_true")
 ap.add_argument("--wake", action="store_true", help="use the wake word instead of the hotkey")
 ap.add_argument("--followup", default="", help="answer Filo's first 'anything else?' with this question, then say bye")
 ap.add_argument("--no-bye", action="store_true", help="let open listening time out instead of saying bye")
+ap.add_argument("--wait-url", default="", help="poll this URL until it answers (e.g. the Kokoro /health) before scripting speech")
 args, _unknown = ap.parse_known_args()
 
 sock = None
@@ -99,6 +100,15 @@ def reader():
 
 threading.Thread(target=reader, daemon=True).start()
 send({"event": "ready", "hotkey": "fake", "hotkey_registered": True, "speech": {"enabled": False}, "pid": 0})
+if args.wait_url:
+    import urllib.request
+    for _ in range(120):
+        try:
+            urllib.request.urlopen(args.wait_url, timeout=1).read()
+            time.sleep(2.5)   # the app polls the voice server every 1.5 s
+            break
+        except Exception:
+            time.sleep(0.5)
 send({"event": "apps", "apps": [{"name": "Finder", "bundle_id": "com.apple.finder"}]})
 time.sleep(args.delay)
 

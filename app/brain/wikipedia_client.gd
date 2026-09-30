@@ -111,6 +111,171 @@ func search_and_summarize(question: String, game_name: String = "", pages: int =
 	return out
 
 
+# ---------------------------------------------------------------------------
+# Any MediaWiki site (English Wikipedia, and every Fandom game wiki — same API).
+# `site` = {"base_url": "https://x.fandom.com", "api_path": "/api.php", "name": "Sekiro wiki"};
+# api_path defaults to "/w/api.php" (Wikipedia's layout). Used by the research agent's
+# wiki_search / wiki_page tools; the summary flow above is unchanged.
+# ---------------------------------------------------------------------------
+
+static func site_api(site: Dictionary) -> String:
+	return str(site.get("base_url", "")).trim_suffix("/") + str(site.get("api_path", "/w/api.php"))
+
+
+static func page_url(site: Dictionary, title: String) -> String:
+	return str(site.get("base_url", "")).trim_suffix("/") + "/wiki/" + title.replace(" ", "_").uri_encode()
+
+
+## {ok, results: [{title, snippet, url}], error}
+func mw_search(site: Dictionary, query: String, limit: int = 5) -> Dictionary:
+	var out := {"ok": false, "results": [], "error": ""}
+	var url := "%s?action=query&list=search&srsearch=%s&srlimit=%d&format=json&formatversion=2" % [site_api(site), query.uri_encode(), clampi(limit, 1, 10)]
+	var res: Dictionary = await _get_json(url)
+	if not res.ok:
+		out.error = res.error
+		return out
+	for hit in (res.data.get("query", {}) if typeof(res.data) == TYPE_DICTIONARY else {}).get("search", []):
+		if typeof(hit) != TYPE_DICTIONARY:
+			continue
+		var title := str(hit.get("title", ""))
+		if title == "":
+			continue
+		out.results.append({
+			"title": title,
+			"snippet": html_to_text(str(hit.get("snippet", ""))).left(220),
+			"url": page_url(site, title),
+		})
+	out.ok = true
+	return out
+
+
+## Cleaned plain text of a page, optionally just one section. {ok, title, url, text, sections, error}
+func mw_page(site: Dictionary, title: String, section: String = "", max_chars: int = 6000) -> Dictionary:
+	var out := {"ok": false, "title": title, "url": "", "text": "", "sections": PackedStringArray(), "error": ""}
+	var url := "%s?action=parse&page=%s&prop=text&redirects=1&disabletoc=1&format=json&formatversion=2" % [site_api(site), title.replace(" ", "_").uri_encode()]
+	var res: Dictionary = await _get_json(url)
+	if not res.ok:
+		out.error = res.error
+		return out
+	var data = res.data
+	if typeof(data) != TYPE_DICTIONARY or typeof(data.get("parse")) != TYPE_DICTIONARY:
+		out.error = "No page called '%s' on that wiki. Try wiki_search first." % title
+		return out
+	var parse: Dictionary = data["parse"]
+	out.title = str(parse.get("title", title))
+	out.url = page_url(site, out.title)
+	var text := html_to_text(str(parse.get("text", "")))
+	out.sections = section_titles(text)
+	if section.strip_edges() != "":
+		var body := section_of(text, section)
+		if body == "":
+			out.error = "That page has no section like '%s'. Sections: %s" % [section, ", ".join(out.sections)]
+			return out
+		text = body
+	elif out.sections.size() > 0:
+		text = "Sections: %s\n\n%s" % [", ".join(out.sections), text]
+	out.text = truncate_text(text, max_chars)
+	out.ok = out.text.strip_edges() != ""
+	if not out.ok:
+		out.error = "That page is empty."
+	return out
+
+
+## HTML -> readable plain text: drops scripts, styles, comments, navboxes, references and
+## edit links; keeps headings as "## Title", list items as "- x", table cells joined by " | ".
+static func html_to_text(html: String) -> String:
+	var t := html
+	for pattern in [
+		"(?s)<!--.*?-->",
+		"(?is)<(script|style|noscript|svg|iframe)\\b.*?</\\1>",
+		"(?is)<table[^>]*class=\"[^\"]*navbox[^\"]*\".*?</table>",
+		"(?is)<sup[^>]*class=\"[^\"]*reference[^\"]*\".*?</sup>",
+		"(?is)<span[^>]*class=\"[^\"]*mw-editsection[^\"]*\".*?</span>\\s*</span>|(?is)<span[^>]*class=\"[^\"]*mw-editsection[^\"]*\".*?</span>",
+	]:
+		var re := RegEx.new()
+		re.compile(pattern)
+		t = re.sub(t, "", true)
+	var subs := [
+		["(?is)<h([1-6])[^>]*>(.*?)</h\\1>", "\n\n## $2\n"],
+		["(?i)<li[^>]*>", "\n- "],
+		["(?i)</(p|div|tr|ul|ol|table|section|blockquote)>", "\n"],
+		["(?i)<br\\s*/?>", "\n"],
+		["(?i)</(td|th)>", " | "],
+		["<[^>]+>", ""],
+	]
+	for pair in subs:
+		var re2 := RegEx.new()
+		re2.compile(pair[0])
+		t = re2.sub(t, pair[1], true)
+	t = decode_entities(t)
+	t = sanitize_text(t)
+	var trailing := RegEx.new()
+	trailing.compile("[ \\t]*\\|[ \\t]*(?=\\n|$)")
+	t = trailing.sub(t, "", true)
+	var ws := RegEx.new()
+	ws.compile("[ \\t\\x{a0}]+")
+	t = ws.sub(t, " ", true)
+	var blank := RegEx.new()
+	blank.compile("\\n[ \\t]*(?:\\n[ \\t]*){2,}")
+	t = blank.sub(t, "\n\n", true)
+	return t.strip_edges()
+
+
+static func decode_entities(t: String) -> String:
+	var out := t.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'").replace("&ndash;", "–").replace("&mdash;", "—")
+	var num := RegEx.new()
+	num.compile("&#(x?)([0-9a-fA-F]+);")
+	for m in num.search_all(out):
+		var code := m.get_string(2).hex_to_int() if m.get_string(1) != "" else int(m.get_string(2))
+		if code > 8 and code < 0x110000:
+			out = out.replace(m.get_string(), String.chr(code))
+	return out.replace("&amp;", "&")
+
+
+## Removes control characters (keeps \n and \t) so nothing odd reaches the model or the log.
+static func sanitize_text(t: String) -> String:
+	var re := RegEx.new()
+	re.compile("[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]")
+	return re.sub(t, "", true)
+
+
+static func truncate_text(t: String, max_chars: int) -> String:
+	if max_chars <= 0 or t.length() <= max_chars:
+		return t
+	var cut := t.left(max_chars)
+	var para := cut.rfind("\n")
+	if para > max_chars * 0.6:
+		cut = cut.left(para)
+	return cut.strip_edges() + "\n[truncated]"
+
+
+static func section_titles(text: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	for line in text.split("\n"):
+		if line.begins_with("## "):
+			var name := line.substr(3).strip_edges()
+			if name != "" and not out.has(name):
+				out.append(name)
+	return out
+
+
+## The text of the section whose heading contains `name` (case-insensitive), heading included.
+static func section_of(text: String, name: String) -> String:
+	var want := name.strip_edges().to_lower()
+	var lines := text.split("\n")
+	var collecting := false
+	var out := PackedStringArray()
+	for line in lines:
+		if line.begins_with("## "):
+			if collecting:
+				break
+			if line.substr(3).strip_edges().to_lower().contains(want):
+				collecting = true
+		if collecting:
+			out.append(line)
+	return "\n".join(out).strip_edges()
+
+
 func _get_json(url: String) -> Dictionary:
 	var http := HTTPRequest.new()
 	http.timeout = timeout_sec

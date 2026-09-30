@@ -104,6 +104,118 @@ func ask(system_prompt: String, user_content: String, _tools: Array = []) -> Dic
 	return out
 
 
+## GET /v1/models once. {ok, ids, error}
+func list_models() -> Dictionary:
+	var out := {"ok": false, "ids": PackedStringArray(), "error": ""}
+	if not has_key():
+		out.error = "No NVIDIA API key configured."
+		return out
+	var http := HTTPRequest.new()
+	http.timeout = 15.0
+	http.accept_gzip = true
+	add_child(http)
+	if http.request(base_url + "/models", build_headers(), HTTPClient.METHOD_GET) != OK:
+		http.queue_free()
+		out.error = "request failed to start"
+		return out
+	var res: Array = await http.request_completed
+	http.queue_free()
+	if res[0] != HTTPRequest.RESULT_SUCCESS or res[1] != 200:
+		out.error = "HTTP %d" % int(res[1]) if res[0] == HTTPRequest.RESULT_SUCCESS else "network error"
+		return out
+	var parsed = JSON.parse_string((res[3] as PackedByteArray).get_string_from_utf8())
+	if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("data")) == TYPE_ARRAY:
+		for m in parsed.data:
+			if typeof(m) == TYPE_DICTIONARY and m.has("id"):
+				out.ids.append(str(m.id))
+	out.ok = true
+	return out
+
+
+## One raw chat-completions round trip for the research agent's tool loop (the
+## agent owns the message history, tool execution, retries and model chain).
+## opts: max_tokens, temperature, timeout, tool_choice, extra_body (merged into the body).
+## Returns {ok, status, message, finish_reason, model, error, retry_after, latency_ms, timed_out}
+## where `message` is the assistant message exactly as the API returned it.
+func chat(model_id: String, messages: Array, tools: Array, opts: Dictionary = {}) -> Dictionary:
+	var out := {"ok": false, "status": 0, "message": {}, "finish_reason": "", "model": model_id, "error": "", "retry_after": 0.0, "latency_ms": 0, "timed_out": false}
+	if not has_key():
+		out.error = "No NVIDIA API key configured."
+		out.status = 401
+		return out
+	var body := build_chat_body(model_id, messages, tools, opts, max_tokens, temperature)
+	last_request = body
+	var http := HTTPRequest.new()
+	http.timeout = float(opts.get("timeout", timeout_sec))
+	http.accept_gzip = true
+	add_child(http)
+	var started := Time.get_ticks_msec()
+	var err := http.request(base_url + "/chat/completions", build_headers(), HTTPClient.METHOD_POST, JSON.stringify(body))
+	if err != OK:
+		http.queue_free()
+		out.error = "Could not start the request (error %d)." % err
+		return out
+	var res: Array = await http.request_completed
+	http.queue_free()
+	out.latency_ms = Time.get_ticks_msec() - started
+	var result: int = res[0]
+	out.status = res[1]
+	if result != HTTPRequest.RESULT_SUCCESS:
+		out.timed_out = result == HTTPRequest.RESULT_TIMEOUT
+		out.error = ClaudeClient._result_error(result).replace("Claude", "NVIDIA NIM")
+		return out
+	for h in res[2]:
+		var hs := str(h)
+		if hs.to_lower().begins_with("retry-after:"):
+			out.retry_after = maxf(0.0, float(hs.substr(12).strip_edges()))
+	var parsed = JSON.parse_string((res[3] as PackedByteArray).get_string_from_utf8())
+	var checked := parse_chat_response(int(out.status), parsed)
+	out.merge(checked, true)
+	if not out.has("model") or str(out.model) == "":
+		out.model = model_id
+	return out
+
+
+## Request body for one tool-loop round trip (static so tests can inspect it).
+static func build_chat_body(model_id: String, messages: Array, tools: Array, opts: Dictionary, default_max_tokens: int, default_temperature: float) -> Dictionary:
+	var body := {
+		"model": model_id,
+		"messages": messages,
+		"max_tokens": int(opts.get("max_tokens", default_max_tokens)),
+		"temperature": float(opts.get("temperature", default_temperature)),
+		"stream": false,
+	}
+	if not tools.is_empty():
+		body["tools"] = tools
+		body["tool_choice"] = str(opts.get("tool_choice", "auto"))
+	var extra = opts.get("extra_body", {})
+	if typeof(extra) == TYPE_DICTIONARY:
+		for k in extra:
+			body[k] = extra[k]
+	return body
+
+
+## {ok, message, finish_reason, model, error} from a decoded chat-completions response.
+static func parse_chat_response(status: int, parsed) -> Dictionary:
+	var out := {"ok": false, "message": {}, "finish_reason": "", "error": ""}
+	if status != 200:
+		out.error = _http_error(status, parsed)
+		return out
+	if typeof(parsed) != TYPE_DICTIONARY or typeof(parsed.get("choices")) != TYPE_ARRAY or parsed.choices.is_empty():
+		out.error = "Unexpected response from NVIDIA NIM."
+		return out
+	var choice = parsed.choices[0]
+	if typeof(choice) != TYPE_DICTIONARY or typeof(choice.get("message")) != TYPE_DICTIONARY:
+		out.error = "Unexpected response from NVIDIA NIM."
+		return out
+	out.message = choice.message
+	out.finish_reason = str(choice.get("finish_reason", ""))
+	if parsed.has("model"):
+		out["model"] = str(parsed.model)
+	out.ok = true
+	return out
+
+
 ## Reasoning models may wrap their thinking in <think>…</think>; speak only the answer.
 static func strip_thinking(text: String) -> String:
 	var re := RegEx.new()

@@ -2,8 +2,12 @@
   "id": "sekiro",
   "name": "Sekiro: Shadows Die Twice",
   "detect": {
-    "process_names": ["sekiro.exe"],
-    "window_titles": ["Sekiro"]
+    "process_names": [
+      "sekiro.exe"
+    ],
+    "window_titles": [
+      "Sekiro"
+    ]
   },
   "kb": {
     "notes_dir": "notes",
@@ -15,5 +19,10 @@
     "anti_cheat": "none shipped with the game — Phase 3 must re-verify before any live overlay use"
   },
   "persona_hint": "Sekiro players expect deflect-first advice: prefer posture, deflection and prosthetic-tool tips over dodging, and never spoil later bosses or endings.",
-  "phase": "Phase 0 sample profile — Phase 1 replaces these notes with the full curated knowledge base and an eval set."
+  "phase": "Phase 0 sample profile — Phase 1 replaces these notes with the full curated knowledge base and an eval set.",
+  "wiki": {
+    "base_url": "https://sekiro-shadows-die-twice.fandom.com",
+    "api_path": "/api.php",
+    "name": "Sekiro wiki"
+  }
 }

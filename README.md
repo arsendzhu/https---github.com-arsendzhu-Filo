@@ -27,7 +27,7 @@ scripts/build_native.sh                   # compiles the full-screen overlay ext
 scripts/run.sh                            # launch the demo (builds both if missing)
 ```
 
-`scripts/test.sh` runs the unit tests, two offline end-to-end passes (hotkey and wake word,
+`scripts/test.sh` runs the unit tests (386 checks, no network), two offline end-to-end passes (hotkey and wake word,
 with a mock Claude API and a scripted helper) and a showcase capture of every animation.
 
 ## Using it
@@ -62,6 +62,46 @@ The hotkey is global (works while a game is focused) and never needs the Accessi
 permission. Change it under `hotkey` in `config.json` (e.g. `{"key": "f8", "modifiers": []}`).
 The overlay is click-through and never takes focus, except while the typed box is open.
 
+## Research agent (NVIDIA NIM tool calling)
+
+With an `NVIDIA_API_KEY`, questions the notes don't answer confidently go to a small research
+agent: the model can call `wiki_search` / `wiki_page` (the game's Fandom wiki, else Wikipedia),
+`web_search` (DuckDuckGo behind a swappable provider) and `fetch_page`, then answers in 1–3 spoken
+sentences. At most 4 model round trips and 6 tool calls, then a forced final answer. Tool output is
+untrusted data (wrapped, sanitized, size-capped; private/loopback addresses are blocked), and
+reasoning text never reaches the bubble or the voice. If every model in the chain fails, Filo falls
+back to Claude (when a key exists) and then to the plain Wikipedia/notes path.
+
+**Model chain** — `research.models` in `config.json`, tried in order; a model that returns
+404/410/429/5xx or times out is skipped for `breaker_seconds` (so a dead model costs one timeout).
+Default: `deepseek-ai/deepseek-v4.1-flash` → `nvidia/nemotron-3-super-120b-a12b` → Claude.
+
+```json
+"research": { "models": [ "nvidia/nemotron-3-super-120b-a12b", "meta/llama-3.3-70b-instruct" ] }
+```
+
+Entries are a model id or `{"id": …, "extra_body_no_think": {…}}` (the request fields that switch
+thinking off for that model). At startup Filo calls `GET /v1/models` once and warns about ids that
+aren't listed. Per game wikis: `wiki` in a profile's `profile.json`, or `research.wikis` for
+games without a profile. The log prints which model answered and per-request latency.
+
+> **Model notes (checked live, 2026-09-29):** `deepseek-ai/deepseek-v4-flash` (and `-0731`) now
+> return **410 end of life**. `deepseek-v4.1-flash` is listed but did not respond within 100 s on the
+> free tier, so in practice `nemotron-3-super-120b-a12b` answers (tool call in ~1 s; a full
+> researched answer typically 4–10 s, occasionally 20 s+ on the shared free tier; ~40 requests/min).
+> Whether DeepSeek accepts `chat_template_kwargs.thinking=false` could not be verified; a 400/422
+> makes Filo retry once without it.
+
+**Tests** — `scripts/test.sh` covers the agent offline (mock NIM, scripted tool calls, injected
+prompts, SSRF, caps, fallback chain, end-to-end). Live, needs `NVIDIA_API_KEY`, otherwise prints
+SKIPPED:
+
+```sh
+scripts/research_live.sh                                       # models listed + tool call returned
+scripts/research_live.sh --bench                               # latency table, 6 sample questions
+scripts/research_live.sh --bench --models nvidia/nemotron-3-super-120b-a12b
+```
+
 ## Test it
 
 Follow [docs/phase0-test-checklist.md](docs/phase0-test-checklist.md) — every step says what you
@@ -77,6 +117,7 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `llm.provider` | `auto` | `auto` = Claude if it has a key, else NVIDIA NIM, else notes-only; or force `anthropic` / `nim` |
 | `model`, `effort` | `claude-opus-5`, `low` | Claude model and reasoning effort (skipped for Haiku) |
 | `nim.model`, `nim.reasoning` | `nvidia/nemotron-3-super-120b-a12b`, `false` | NIM model; reasoning off keeps spoken answers ~3 s |
+| `research.*` | see above | NIM tool-calling agent: `models`, `thinking`, `max_rounds`, `max_tool_calls`, `attempt_timeout`, `tool_timeout`, `cache_ttl`, `breaker_seconds`, `claude_fallback`, `search_provider`, `wikis` |
 | `refusal_fallbacks` | true | Claude only: server-side fallback if the safety classifier declines a request |
 | `web_search.enabled` / `max_uses` / `confidence_threshold` | true / 2 / 0.45 | live web fallback when the notes don't cover the question |
 | `web_search.provider` | `auto` | `auto` = Claude's web search with Claude, free **Wikipedia** summaries otherwise (NIM); or `anthropic` / `wikipedia` / `off` |

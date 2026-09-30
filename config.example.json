@@ -67,5 +67,41 @@
   "nim": {
     "model": "nvidia/nemotron-3-super-120b-a12b",
     "reasoning": false
+  },
+  "research": {
+    "enabled": true,
+    "models": [
+      {
+        "id": "deepseek-ai/deepseek-v4.1-flash",
+        "extra_body_no_think": {
+          "chat_template_kwargs": {
+            "thinking": false
+          }
+        }
+      },
+      {
+        "id": "nvidia/nemotron-3-super-120b-a12b",
+        "extra_body_no_think": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        }
+      }
+    ],
+    "thinking": false,
+    "max_rounds": 4,
+    "max_tool_calls": 6,
+    "max_page_chars": 6000,
+    "max_tokens": 350,
+    "temperature": 0.3,
+    "attempt_timeout": 20.0,
+    "tool_timeout": 10.0,
+    "cache_ttl": 900.0,
+    "breaker_seconds": 300.0,
+    "warmup_probe": true,
+    "claude_fallback": true,
+    "search_provider": "duckduckgo",
+    "max_redirects": 3,
+    "max_fetch_bytes": 1500000
   }
 }
