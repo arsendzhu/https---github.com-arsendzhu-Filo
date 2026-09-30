@@ -80,6 +80,8 @@ const DEFAULTS := {
 		"volume": 70,
 		"kokoro": {"voice": "af_heart", "speed": 1.05, "port": 47823},
 		"stream_first_sentence": true,
+		"normalize_speech": true,           # spoken-style text (see SpeechNormalizer); the bubble text is unchanged
+		"pronunciations": {},               # e.g. {"Cthulhu": "Kuh-thoo-loo", "Smough": "Smoke"}
 		"acknowledgements": ["Let me check that.", "One moment.", "Looking that up.", "Let me see."],
 	},
 	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420, "idle_fps": 10},

@@ -35,6 +35,7 @@ func _init() -> void:
 	_test_failure_ux()
 	await _test_spoiler_levels()
 	_test_answer_quality()
+	_test_speech_normalizer()
 	await _test_prefetch()
 	await test_golden_questions_eval()
 	await _test_speaker_continuation()
@@ -1694,3 +1695,34 @@ func _test_answer_quality() -> void:
 	var pr := a.system_prompt("Terraria", true)
 	check(pr.contains("wiki doesn't cover that") and pr.contains("section argument") and pr.contains("never answer game facts from memory"), "the research prompt says to admit when the wiki does not cover it and to read by section")
 	a.free()
+
+
+# --------------------------------------------------------------------- spoken-style text (Tier 2)
+
+func _test_speech_normalizer() -> void:
+	var n := func(t: String, p: Dictionary = {}) -> String: return SpeechNormalizer.normalize(t, p)
+	check(n.call("**Dodge** its charges, then use `fire`.") == "Dodge its charges, then use fire.", "markdown emphasis and code marks are dropped")
+	check(n.call("See [the wiki](https://terraria.wiki.gg/wiki/Eye) for more.") == "See the wiki for more.", "links keep their text, never the address")
+	check(n.call("Read more at https://example.com/page now.") == "Read more at now.", "bare URLs are never read out")
+	check(n.call("- Get the key\n- Open the door") == "Get the key Open the door", "list markers and line breaks are flattened")
+	check(n.call("It has 4500 HP and deals 30% more DPS.") == "It has 4500 health points and deals 30 percent more damage per second.", "HP, DPS and % are expanded: " + n.call("It has 4500 HP and deals 30% more DPS."))
+	check(n.call("Do 5-15 damage, +3 defense, x2 speed, 2x drops.") == "Do 5 to 15 damage, plus 3 defense, times 2 speed, 2 times drops.", "ranges, plus, times: " + n.call("Do 5-15 damage, +3 defense, x2 speed, 2x drops."))
+	check(n.call("It costs 1,250 gold.") == "It costs 1250 gold.", "thousands separators are removed")
+	check(n.call("Talk to the mini-boss vs. the NPC, e.g. the guide.") == "Talk to the mini-boss versus the N P C, for example the guide.", "words with hyphens are left alone; vs., NPC, e.g. are expanded: " + n.call("Talk to the mini-boss vs. the NPC, e.g. the guide."))
+	check(n.call("The hp bar") == "The hp bar" and n.call("SHPX") == "SHPX", "acronyms only match as written and as whole words")
+	var pron := {"Cthulhu": "Kuh-thoo-loo", "Smough": "Smoke"}
+	check(n.call("The Eye of Cthulhu and cthulhu's servants beat Smough.", pron) == "The Eye of Kuh-thoo-loo and Kuh-thoo-loo's servants beat Smoke.", "pronunciation overrides apply case-insensitively to whole words: " + n.call("The Eye of Cthulhu and cthulhu's servants beat Smough.", pron))
+	check(n.call("Smoughs are cool", pron) == "Smoughs are cool", "...but not inside longer words")
+	check(n.call(n.call("30% HP x2")) == n.call("30% HP x2"), "normalizing twice changes nothing more")
+	# the bubble keeps the original; the reveal position follows the words when the spoken text is longer
+	check(Speaker.map_spoken_position(5, 14, "same length ok") == 5, "same length: positions are unchanged")
+	var display := "It has 4500 HP left"                                   # 19 chars
+	var spoken := "It has 4500 health points left"                         # 30 chars
+	var at_left := Speaker.map_spoken_position(spoken.find("left"), spoken.length(), display)
+	check(display.substr(at_left).begins_with("left") or display.substr(at_left).begins_with("HP"), "a position inside the expanded text maps back to a word of the displayed text (%d -> '%s')" % [spoken.find("left"), display.substr(at_left)])
+	var sp := Speaker.new()
+	sp.pronunciations = {"Smough": "Smoke"}
+	check(sp.spoken_form("**Smough** has 20 HP.") == "Smoke has 20 health points." and sp.spoken_form("Hi") == "Hi", "Speaker.spoken_form applies the normalizer")
+	sp.normalize_speech = false
+	check(sp.spoken_form("**Smough** has 20 HP.") == "**Smough** has 20 HP.", "...unless turned off")
+	sp.free()
