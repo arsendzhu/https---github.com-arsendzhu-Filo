@@ -10,6 +10,8 @@ var max_turns := 4
 var idle_reset_seconds := 900.0
 var last_active := -1.0
 var clock := Callable()        # optional func() -> float seconds (tests)
+var last_question := ""        # the last factual question and the spoiler level it was answered at ("tell me more")
+var last_level := ""
 
 
 func _now() -> float:
@@ -27,6 +29,8 @@ func begin_question(question_game: String) -> String:
 	if reason != "":
 		turns.clear()
 		game = ""
+		last_question = ""
+		last_level = ""
 	if question_game != "":
 		game = question_game
 	last_active = now
@@ -51,6 +55,8 @@ func last_topic() -> String:
 
 
 func clear() -> void:
+	last_question = ""
+	last_level = ""
 	turns.clear()
 	game = ""
 	last_active = -1.0

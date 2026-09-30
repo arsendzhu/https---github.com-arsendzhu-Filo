@@ -33,6 +33,8 @@ func _init() -> void:
 	test_settings_persist_roundtrip()
 	await _test_status_and_ack()
 	_test_failure_ux()
+	await _test_spoiler_levels()
+	_test_answer_quality()
 	await _test_prefetch()
 	await test_golden_questions_eval()
 	await _test_speaker_continuation()
@@ -1618,3 +1620,77 @@ func _test_failure_ux() -> void:
 	for kind in FailureUX.KINDS:
 		var k: Dictionary = FailureUX.KINDS[kind]
 		check(str(k.spoken).split(" ", false).size() <= 14 and str(k.spoken) != "" and str(k.visual).length() > str(k.spoken).length() and not str(k.spoken).contains("HTTP") and not str(k.visual).contains("HTTP"), "the '%s' messages are short, spoken-friendly and free of error codes" % kind)
+
+
+# ------------------------------------------------------------------------ spoiler control (Tier 2)
+
+func _test_spoiler_levels() -> void:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	check(QueryRouter.classify("tell me more") == "command" and QueryRouter.command_for("hey filo, tell me more") == "more" and QueryRouter.command_for("just tell me") == "full" and QueryRouter.command_for("spoil it") == "full", "'tell me more' and 'spoil it' are commands")
+	check(QueryRouter.classify("what about the second phase") == "factual" and QueryRouter.classify("more health potions for the boss fight") == "factual", "ordinary questions that contain those words are not")
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary: return _reply("Use a platform arena.")
+	var p := _make_pipeline(s, null, true)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Eye of Cthulhu"]
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "page"}
+	check(p.default_level() == "hint", "the default spoiler level is a hint")
+	var r: Dictionary = await p.ask(Q)
+	check(r.level == "hint" and s.calls[0].messages[0].content.contains("Spoiler level: HINT"), "the first answer is a hint (level in the prompt and in the result)")
+	var m: Dictionary = p.more_request()
+	check(m.question == Q and m.level == "nudge", "'tell me more' asks the same question at the next level: " + str(m))
+	r = await p.ask(m.question, Callable(), m.level)
+	check(r.level == "nudge" and s.calls[s.calls.size() - 1].messages[0].content.contains("Spoiler level: NUDGE"), "...as a nudge")
+	m = p.more_request()
+	check(m.level == "full", "...and then the full answer")
+	r = await p.ask(m.question, Callable(), m.level)
+	check(r.level == "full" and s.calls[s.calls.size() - 1].messages[0].content.contains("Spoiler level: FULL"), "the full answer asks for the complete details")
+	m = p.more_request()
+	check(m.question == "" and m.text.contains("full answer"), "there is nothing beyond the full answer: '%s'" % m.text)
+	r = await p.ask("How do I beat Skeletron in Terraria")
+	check(p.more_request(true).level == "full", "'spoil it' jumps straight to the full answer")
+	# the command through ask()
+	r = await p.ask("tell me more")
+	check(r.route == "command" and r.command == "more" and r.question == "How do I beat Skeletron in Terraria" and r.level == "nudge", "asking 'tell me more' returns the previous question at the next level: " + str(r.get("question")))
+	p.cfg.data["settings"] = {"spoiler_level": "full"}
+	check(p.default_level() == "full", "the user's setting decides the starting level")
+	var fresh := _make_pipeline(ScriptedModel.new())
+	r = await fresh.ask("tell me more")
+	check(r.command == "more" and r.question == "" and r.text.contains("nothing to add"), "with no earlier question there is nothing to expand: " + str(r.get("text")))
+	check(Bubble.footer_text([], true, true).contains("tell me more") and not Bubble.footer_text([], true, false).contains("tell me more"), "the bubble offers 'tell me more' after a hint or nudge only")
+	p.free()
+	fresh.free()
+
+
+# ------------------------------------------------------------------------ answer quality (Tier 2)
+
+func _test_answer_quality() -> void:
+	var sections := PackedStringArray(["Overview", "Drops", "Strategy", "Classic mode", "Trivia", "History"])
+	check(WikipediaClient.pick_section("How do I beat the Eye of Cthulhu in Terraria", sections) == "Strategy", "a 'how do I beat' question reads the Strategy section")
+	check(WikipediaClient.pick_section("What does the Wall of Flesh drop", sections) == "Drops", "a drops question reads Drops")
+	check(WikipediaClient.pick_section("where do I find the Guide voodoo doll", PackedStringArray(["Notes", "Spawn", "Strategy"])) == "Spawn", "a 'where' question reads Spawn/Location")
+	check(WikipediaClient.pick_section("who is Kliff", sections) == "" and WikipediaClient.pick_section("beat it", PackedStringArray(["Gallery"])) == "", "no matching heading -> nothing picked")
+	# a long page: 30 lines of overview, then the parts that matter, then trivia
+	var text := "The Eye of Cthulhu is an early boss.\n\n## Overview\n" + "Filler sentence about the boss and its arena. ".repeat(150)
+	text += "\n\n## Drops\n- Lens\n- Black Lens\n\n## Strategy\nFight it on a long flat arena with platforms.\nIn phase two it charges fast, so keep moving and dodge sideways.\nKill its servants first.\n\n## Classic mode\nThe first phase is easier. Keep your distance and use a ranged weapon.\n\n## Trivia\nThe name comes from a story."
+	var titles := WikipediaClient.section_titles(text)
+	var sel := WikipediaClient.select_page_text(text, titles, "", "How do I beat the Eye of Cthulhu?", 3000)
+	check(sel.picked == "Strategy" and sel.text.contains("dodge sideways") and sel.text.contains("Keep your distance") and sel.text.contains("Showing the 'Strategy' part") and sel.text.contains("early boss") and not sel.text.contains("The name comes from") and not sel.text.contains("Filler sentence about the boss and its arena. Filler sentence about the boss and its arena. Filler"), "a long page: the strategy (with its sub-section) and the page's opening lines, not the filler or the trivia")
+	check(sel.text.length() < 2600, "the selection fits the limit (%d chars)" % sel.text.length())
+	var whole := WikipediaClient.select_page_text("Short page.\n\n## Strategy\nDo it.", PackedStringArray(["Strategy"]), "", "how do I beat it", 3000)
+	check(whole.picked == "" and whole.text.contains("Short page.") and whole.text.contains("Sections: Strategy"), "a short page is given whole")
+	check(WikipediaClient.select_page_text(text, titles, "Drops", "how do I beat it", 3000).picked == "Drops", "a section asked for by name always wins")
+	check(WikipediaClient.select_page_text(text, titles, "Nonexistent", "", 3000).error.contains("no section like"), "an unknown section is reported with the list of real ones")
+	check(WikipediaClient.select_page_text(text, titles, "", "", 3000).text.begins_with("Sections:"), "without a question to focus on the page is read from the top, as before")
+	check(WikipediaClient.section_run(text, "Strategy", 5000).contains("Classic mode") and not WikipediaClient.section_run(text, "Strategy", 5000).contains("Trivia"), "a section run continues into sub-sections and stops at Trivia")
+	# preferred sources first
+	var results := [{"url": "https://www.gamesradar.com/x"}, {"url": "https://terraria.wiki.gg/wiki/A"}, {"url": "https://random.example/b"}, {"url": "https://hollowknight.fandom.com/wiki/C"}]
+	var ranked := WebTools.rank_results(results, ["wiki.gg", "fandom.com"])
+	check(ranked.map(func(r: Dictionary) -> String: return r.url.get_slice("/", 2)) == ["terraria.wiki.gg", "hollowknight.fandom.com", "www.gamesradar.com", "random.example"], "wiki hosts are ranked ahead of other sites, each group in its original order")
+	check(WebTools.rank_results(results, []).size() == 4, "no preference leaves the results alone")
+	# the model is told to stay inside the text it was given
+	var a := ResearchAgent.new()
+	var pr := a.system_prompt("Terraria", true)
+	check(pr.contains("wiki doesn't cover that") and pr.contains("section argument") and pr.contains("never answer game facts from memory"), "the research prompt says to admit when the wiki does not cover it and to read by section")
+	a.free()

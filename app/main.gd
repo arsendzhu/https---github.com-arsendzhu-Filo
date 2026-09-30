@@ -655,7 +655,7 @@ func _enter_listening() -> void:
 	bubble.show_listening(_last_partial)
 
 
-func _ask(question: String, source: String = "voice") -> void:
+func _ask(question: String, source: String = "voice", level: String = "") -> void:
 	question_asked.emit(question, source)
 	_set_state(AppState.THINKING)
 	bubble.show_thinking(question)
@@ -669,7 +669,7 @@ func _ask(question: String, source: String = "voice") -> void:
 	var on_sentence := Callable()
 	if bool(cfg.get_value("tts.stream_first_sentence", true)):
 		on_sentence = func(sentence: String) -> void: _on_streamed_head(token, question, sentence, streamed)
-	var result: Dictionary = await pipeline.ask(question, on_sentence)
+	var result: Dictionary = await pipeline.ask(question, on_sentence, level)
 	ack_timer.stop()
 	if token != _answer_token or (streamed.head == "" and app_state != AppState.THINKING):
 		FiloLog.debug("Answer discarded (superseded)")
@@ -691,7 +691,7 @@ func _ask(question: String, source: String = "voice") -> void:
 	_send_vocabulary()
 	_had_first_answer = true
 	_set_state(AppState.ANSWERING)
-	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))
+	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)), _can_expand(result))
 	_speak(result.spoken, "answer")
 
 
@@ -723,6 +723,11 @@ func _status_kind() -> String:
 	return StatusPill.kind_for(AppState.keys()[app_state], mic_muted, now < _error_until, now < _heard_until)
 
 
+## A hint or a nudge can be followed by "tell me more"; local notes and full answers cannot.
+func _can_expand(result: Dictionary) -> bool:
+	return str(result.get("level", "full")) != "full" and str(result.get("route", "")) in ["tool_loop", "fallback"]
+
+
 func _on_streamed_head(token: int, question: String, sentence: String, streamed: Dictionary) -> void:
 	if token != _answer_token or app_state != AppState.THINKING or streamed.head != "":
 		return
@@ -746,7 +751,7 @@ func _finish_streamed_answer(question: String, result: Dictionary, head: String)
 	_send_vocabulary()
 	_had_first_answer = true
 	var full := str(result.text)
-	bubble.update_answer(full, result.sources, bool(result.get("used_web", false)))
+	bubble.update_answer(full, result.sources, bool(result.get("used_web", false)), _can_expand(result))
 	if not speaker.is_speaking():
 		bubble.reveal_all()          # muted or interrupted meanwhile: the text is all there is
 		return
@@ -781,6 +786,16 @@ func _handle_command(result: Dictionary) -> void:
 			_set_state(AppState.ANSWERING)
 			bubble.show_answer("", str(result.text), [], false)
 			_speak(str(result.spoken), "answer")
+		"more", "full":
+			var q := str(result.get("question", ""))
+			if q == "":
+				bubble.show_info(str(result.text))
+				_set_state(AppState.IDLE)
+				_speak(str(result.text), "info")
+			else:
+				FiloLog.info("Spoiler level -> %s for: %s" % [result.level, q])
+				_ask(q, "voice", str(result.level))
+				return
 		_:
 			_set_state(AppState.IDLE)
 	if _scripted and cmd != "repeat":

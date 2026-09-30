@@ -241,6 +241,22 @@ func _resolve(host: String) -> PackedStringArray:
 
 
 ## True for anything that is not an ordinary public unicast address (fails closed on junk).
+## Results from the preferred domains first (official / community wikis), the rest after, each group in its original
+## order. `preferred`: domain suffixes such as "wiki.gg", "fandom.com".
+static func rank_results(results: Array, preferred: Array) -> Array:
+	var first := []
+	var rest := []
+	for r in results:
+		var host := str(r.get("url", "")).get_slice("://", 1).get_slice("/", 0).to_lower()
+		var hit := false
+		for d in preferred:
+			var dom := str(d).to_lower()
+			if host == dom or host.ends_with("." + dom):
+				hit = true
+		(first if hit else rest).append(r)
+	return first + rest
+
+
 static func is_blocked_ip(ip: String) -> bool:
 	var a := ip.strip_edges().to_lower()
 	if a.contains(":"):

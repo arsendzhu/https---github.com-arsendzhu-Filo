@@ -126,25 +126,36 @@ func show_thinking(question: String) -> void:
 	footer.visible = true
 
 
-func show_answer(question: String, text: String, sources: Array, used_web: bool) -> void:
+const MORE_HINT := "say “tell me more” for more"
+
+
+func show_answer(question: String, text: String, sources: Array, used_web: bool, can_expand: bool = false) -> void:
 	_set_mode(Mode.ANSWER)
 	header.text = "You asked: " + _truncate(question, 90)
 	_set_body(text)
 	body.visible_characters = 0
-	var src := format_sources(sources, used_web)
+	var src := footer_text(sources, used_web, can_expand)
 	footer.text = src
 	footer.visible = src != ""
 
 
+## Sources line, plus the "tell me more" cue when the answer was only a hint or a nudge.
+static func footer_text(sources: Array, used_web: bool, can_expand: bool) -> String:
+	var src := format_sources(sources, used_web)
+	if can_expand:
+		src = (src + "   ·   " + MORE_HINT) if src != "" else "◆ " + MORE_HINT
+	return src
+
+
 ## The full answer arrived after only its first sentence was shown (streamed speech): swap the text in place,
 ## keeping how much of it has been revealed so far.
-func update_answer(text: String, sources: Array, used_web: bool) -> void:
+func update_answer(text: String, sources: Array, used_web: bool, can_expand: bool = false) -> void:
 	if mode != Mode.ANSWER:
 		return
 	var keep := body.visible_characters
 	_set_body(text)
 	body.visible_characters = keep
-	var src := format_sources(sources, used_web)
+	var src := footer_text(sources, used_web, can_expand)
 	footer.text = src
 	footer.visible = src != ""
 

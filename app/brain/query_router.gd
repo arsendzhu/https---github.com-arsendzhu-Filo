@@ -31,6 +31,8 @@ const COMMANDS := {
 	"mute": ["mute", "mute yourself", "mute voice", "mute the voice", "go silent", "stay silent"],
 	"unmute": ["unmute", "unmute yourself", "unmute voice", "speak again", "you can talk again"],
 	"repeat": ["repeat", "repeat that", "say that again", "say again", "what was that", "come again"],
+	"more": ["tell me more", "more", "more please", "give me more", "go on", "continue", "elaborate", "explain more", "another hint", "next hint", "a bit more", "a little more"],
+	"full": ["spoil it", "just tell me", "tell me everything", "give me the answer", "full answer", "the full answer", "give me the full answer", "spoil it for me"],
 }
 
 const SMALLTALK_PATTERNS := [
