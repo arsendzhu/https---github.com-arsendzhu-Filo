@@ -64,6 +64,7 @@ var mic_mute_confirmed := false # the helper acknowledged the last set_mute
 var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
 var _mute_deadline := 0.0
 var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _failure_spoken := {}         # failure kind -> when it was last spoken (no repeating the same complaint)
 var _error_until := 0.0          # seconds (ticks) until which the status shows a problem
 var _heard_until := 0.0          # ...and "Heard you"
 var _vocab_table: Dictionary = {}
@@ -188,8 +189,7 @@ func _build_ui() -> void:
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.mouse_filter = MOUSE_FILTER_IGNORE
 	hint.text = _activation_hint()
-	hint.position = Vector2(mascot.position.x - 200.0, mascot.position.y + mascot.display_pts * 0.87)
-	hint.size = Vector2(mascot.display_pts + 200.0, 18.0)
+	hint.autowrap_mode = TextServer.AUTOWRAP_OFF
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hint.modulate.a = 0.0
 	add_child(hint)
@@ -283,6 +283,8 @@ func _helper_extra_flags() -> PackedStringArray:
 		"--ptt-tail-ms", str(cfg.get_value("speech.ptt_tail_ms", 300))]))
 	if str(cfg.get_value("speech.keep_mic_warm", "auto")).to_lower() == "off":
 		flags.append("--no-keep-warm")
+	if bool(cfg.get_value("speech.voice_barge_in", false)):
+		flags.append("--voice-barge-in")
 	if bool(cfg.get_value("debug.save_audio", false)):
 		flags.append_array(PackedStringArray(["--debug-audio-dir", cfg.resolve_path(str(cfg.get_value("debug.audio_dir", "logs/audio"))), "--debug-audio-keep", str(cfg.get_value("debug.audio_keep", 20))]))
 	if _mute_hotkey_enabled():
@@ -361,6 +363,12 @@ func _on_helper_watchdog() -> void:
 
 func _on_helper_error(code: String, message: String) -> void:
 	FiloLog.warn("Helper error [%s]: %s" % [code, message])
+	if code != "retry":
+		var failure := FailureUX.classify(message, code)
+		if failure.kind != "generic":
+			_error_until = Time.get_ticks_msec() / 1000.0 + 6.0
+			message = failure.visual
+			_speak_failure(failure)
 	match code:
 		"retry", "muted":
 			_notice(message)
@@ -842,12 +850,24 @@ func _pick(options, fallback: String) -> String:
 
 func _show_error(message: String) -> void:
 	_error_until = Time.get_ticks_msec() / 1000.0 + 6.0
-	bubble.show_error(message)
+	var failure := FailureUX.classify(message)
+	FiloLog.info("Failure (%s): %s" % [failure.kind, message.left(160)])
+	bubble.show_error(failure.visual if failure.kind != "generic" else message)
 	mascot.animator.play_error()
 	_set_state(AppState.IDLE, false)
 	linger_timer.start(float(cfg.get_value("behavior.answer_linger", 12.0)))
+	_speak_failure(failure)
 	if _scripted:
 		_finish_scripted()
+
+
+## Say the short version of a failure (unless the voice is muted; never the same complaint twice within 20 s).
+func _speak_failure(failure: Dictionary) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - float(_failure_spoken.get(failure.kind, -100.0)) < 20.0:
+		return
+	_failure_spoken[failure.kind] = now
+	_speak(str(failure.spoken), "error")
 
 
 func _on_error_finished() -> void:
@@ -1129,6 +1149,10 @@ func _layout_controls() -> void:
 	want.y = clampf(want.y, 4.0, maxf(4.0, pts.y - controls.size.y - 4.0))
 	if controls.position != want:
 		controls.position = want
+	# the activation hint sits to the left of the bar, on the same row (two short lines)
+	hint.size = Vector2(maxf(40.0, controls.position.x - 10.0), controls.size.y)
+	hint.position = Vector2(4.0, controls.position.y)
+	hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 
 
 ## Rects (window-local points) that must take clicks right now.
@@ -1248,8 +1272,8 @@ func _wake_enabled() -> bool:
 
 func _activation_hint() -> String:
 	if _wake_enabled():
-		return "say “%s” · hold %s · say “%s” or tap %s to dismiss" % [str(cfg.get_value("wake_word.phrase", "hey filo")), cfg.hotkey_label(), str(cfg.get_value("wake_word.bye_phrase", "bye filo")), cfg.hotkey_label()]
-	return "hold %s · talk     tap %s · dismiss" % [cfg.hotkey_label(), cfg.hotkey_label()]
+		return "say “%s” or hold %s\n“%s” or tap %s to dismiss" % [str(cfg.get_value("wake_word.phrase", "hey filo")), cfg.hotkey_label(), str(cfg.get_value("wake_word.bye_phrase", "bye filo")), cfg.hotkey_label()]
+	return "hold %s · talk\ntap %s · dismiss" % [cfg.hotkey_label(), cfg.hotkey_label()]
 
 
 func _activation_sentence() -> String:
@@ -1273,8 +1297,14 @@ func _hide_hint() -> void:
 	hint.modulate.a = 0.0
 
 
+## Awake: full speed. Asleep (nothing to draw but the control bar): the cube's render pass is switched off, the
+## frame rate drops to 10 and the engine sleeps between events, so an idle Filo costs almost nothing while a game runs.
+## (The click-through check runs every frame, so the controls still react within ~100 ms.)
 func _set_fps(awake: bool) -> void:
-	Engine.max_fps = 60 if awake else 15
+	Engine.max_fps = 60 if awake else int(cfg.get_value("overlay.idle_fps", 10))
+	OS.low_processor_usage_mode = not awake
+	if mascot != null:
+		mascot.set_rendering(awake)
 
 
 func showcase_done() -> void:

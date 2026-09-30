@@ -48,6 +48,7 @@ func _run() -> void:
 	await _test_typing_over_ipc()
 	_test_status_pill_follows_the_app()
 	await test_barge_in_stops_tts()
+	await _test_failures_are_spoken_and_shown()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -245,6 +246,7 @@ func _test_status_pill_follows_the_app() -> void:
 	check(main.controls.status.label() == "Heard you", "right after a transcript arrives the status says it was heard")
 	main._heard_until = 0.0
 	main._show_error("test error")
+	main.speaker.stop()                # the failure message is spoken (see _test_failures_are_spoken_and_shown)
 	main.controls.status.set_kind(main._status_kind())
 	check(main.controls.status.label() == "Problem", "an error shows 'Problem'")
 	main._error_until = 0.0
@@ -262,6 +264,7 @@ func _test_status_pill_follows_the_app() -> void:
 ## resets the pipeline: no stale 'finished', no tail spoken later, no late answer overwriting the new turn.
 func test_barge_in_stops_tts() -> void:
 	var sp: Speaker = main.speaker
+	sp.stop()                          # start from silence: earlier tests may have left something speaking
 	var cancelled := [0]
 	var finished := [0]
 	sp.cancelled.connect(func(_i: int) -> void: cancelled[0] += 1)
@@ -302,3 +305,20 @@ func test_barge_in_stops_tts() -> void:
 	check(not sp.is_speaking(), "_interrupt_speech() is safe to call at any time and stops everything")
 	main._interrupt_speech()
 	check(cancelled[0] == 3, "...and calling it again with nothing to stop does nothing")
+
+
+func _test_failures_are_spoken_and_shown() -> void:
+	main._failure_spoken.clear()
+	main.speaker.last_text = ""
+	main._show_error("I can't reach NVIDIA NIM — is the internet connected?")
+	check(main.bubble.mode == Bubble.Mode.ERROR and main.bubble.body.text.contains("internet"), "a failure is shown in the bubble: '%s'" % main.bubble.body.text)
+	check(main.speaker.last_text == "I can't reach the internet right now.", "...and spoken in one short sentence: '%s'" % main.speaker.last_text)
+	main.speaker.last_text = ""
+	await create_timer(0.3).timeout
+	main._show_error("I can't reach Claude — is the internet connected?")
+	check(main.speaker.last_text == "" and main.bubble.mode == Bubble.Mode.ERROR, "the same complaint is not spoken twice in a row (it is still shown)")
+	main._on_helper_error("no_input_device", "No microphone input was found (noInput).")
+	check(main.speaker.last_text.begins_with("I can't find a microphone"), "a helper error (no microphone) is spoken too: '%s'" % main.speaker.last_text)
+	main._on_helper_error("mic_denied", "Microphone access is off.")
+	check(main.speaker.last_text.contains("permission"), "microphone permission denied is spoken: '%s'" % main.speaker.last_text)
+	main.speaker.stop()

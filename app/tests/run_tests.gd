@@ -32,6 +32,7 @@ func _init() -> void:
 	await test_followup_uses_session_context()
 	test_settings_persist_roundtrip()
 	await _test_status_and_ack()
+	_test_failure_ux()
 	await _test_prefetch()
 	await test_golden_questions_eval()
 	await _test_speaker_continuation()
@@ -1592,3 +1593,28 @@ func _test_status_and_ack() -> void:
 	check(not sp._ack_player.playing, "starting the answer cuts an acknowledgement that is still playing")
 	sp.stop()
 	sp.queue_free()
+
+
+# ------------------------------------------------------------------------ failure messages (Tier 1)
+
+func _test_failure_ux() -> void:
+	# the failures that must never be silent, from the raw strings the app really produces
+	var cases := [
+		["", "no_input_device", "no_microphone"], ["", "audio_engine", "no_microphone"],
+		["", "mic_denied", "mic_permission"], ["", "speech_denied", "mic_permission"],
+		["I can't reach Claude — is the internet connected?", "", "no_internet"], ["I can't reach NVIDIA NIM — is the internet connected?", "", "no_internet"],
+		["NVIDIA NIM is having trouble right now. Try again in a bit.", "", "service_down"], ["NVIDIA NIM took too long to answer. Try again.", "", "service_down"],
+		["NVIDIA NIM error 410. The model 'x' has reached its end of life", "", "service_down"],
+		["NVIDIA NIM is rate-limiting us. Give it a moment.", "", "rate_limited"], ["Claude is overloaded", "", "rate_limited"],
+		["NVIDIA NIM rejected the API key. Check NVIDIA_API_KEY in .env.", "", "bad_key"], ["Claude rejected the API key. Check anthropic_api_key in config.json.", "", "bad_key"],
+		["No NVIDIA API key configured.", "", "no_key"],
+		["Error: no wiki API was found for 'X'.", "", "not_found"], ["I couldn't find that in the wiki", "", "not_found"],
+		["", "speech_unavailable", "speech_unavailable"], ["", "recognition", "recognition"], ["", "muted", "muted"],
+		["something nobody planned for", "", "generic"],
+	]
+	for c in cases:
+		var f := FailureUX.classify(c[0], c[1])
+		check(f.kind == c[2], "failure '%s' [%s] is classified as %s (got %s)" % [str(c[0]).left(50), c[1], c[2], f.kind])
+	for kind in FailureUX.KINDS:
+		var k: Dictionary = FailureUX.KINDS[kind]
+		check(str(k.spoken).split(" ", false).size() <= 14 and str(k.spoken) != "" and str(k.visual).length() > str(k.spoken).length() and not str(k.spoken).contains("HTTP") and not str(k.visual).contains("HTTP"), "the '%s' messages are short, spoken-friendly and free of error codes" % kind)

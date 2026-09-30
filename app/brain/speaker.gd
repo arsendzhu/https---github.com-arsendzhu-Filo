@@ -50,6 +50,7 @@ var _speech_duration := 0.0
 var _root := ""
 # Short "let me check that" clips played when an answer is slow (pre-generated at start-up, cached on disk).
 var acknowledgements: Array = ["Let me check that.", "One moment.", "Looking that up.", "Let me see."]
+var last_text := ""                  # the last text handed to speak() (tests, debugging)
 var last_ack := ""
 var ack_count := 0
 var _ack_cache := {}                 # phrase -> parsed wav
@@ -150,6 +151,7 @@ func speak(text: String, expect_more: bool = false) -> int:
 	stop()                            # also cuts an acknowledgement that is still playing
 	_reset_continuation()
 	_full_text = text                  # the head; boundary offsets for an appended tail are counted from its end
+	last_text = text
 	_more_expected = expect_more
 	_current_id = _next_id
 	_next_id += 1

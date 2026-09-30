@@ -82,7 +82,7 @@ const DEFAULTS := {
 		"stream_first_sentence": true,
 		"acknowledgements": ["Let me check that.", "One moment.", "Looking that up.", "Let me see."],
 	},
-	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420},
+	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420, "idle_fps": 10},
 	"mascot": {"internal_resolution": 96, "size": 200, "dither": 0.09, "vertex_jitter": 0.0},
 	"behavior": {
 		"idle_timeout": 0.0,
@@ -103,7 +103,7 @@ const DEFAULTS := {
 	# question, how long push-to-talk keeps recording after the key is released. `hotwords`: extra recogniser
 	# hints per game ({"game": ["term", ...]}), on top of profiles/vocabulary.json. `term_correction` repairs
 	# mis-heard game terms in the transcript. `keep_mic_warm`: auto = only while the wake word is on.
-	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true},
+	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true, "voice_barge_in": false},
 	# Debug: save every captured utterance (16 kHz WAV, newest 20 kept) so the raw audio can be listened to.
 	"debug": {"save_audio": false, "audio_dir": "logs/audio", "audio_keep": 20},
 	"verbose": false,

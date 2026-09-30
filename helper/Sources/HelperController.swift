@@ -221,6 +221,10 @@ final class HelperController {
             // voice the whole time it talks. wake_resume starts a clean,
             // fresh session right after, which is simple and race-free.
             filoSpeaking = true
+            // Voice barge-in (opt in): keep the wake listener running while Filo talks so "hey filo" can cut it off.
+            // The catch: on laptop speakers the microphone also hears Filo's own voice, which can occasionally
+            // sound like the wake phrase - that is why it is off by default.
+            if options.voiceBargeIn { return }
             audio.setKeepWarm(false)
             audio.clearPreRoll()      // never replay Filo's own voice into the next request
             wake?.stop()
