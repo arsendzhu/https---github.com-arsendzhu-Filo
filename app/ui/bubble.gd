@@ -24,6 +24,7 @@ var tail_y := 40.0
 var tail_anchor_x := 0.0     # x of the tail tip, set by Main every frame
 var bottom_anchor_y := 0.0   # y of the bubble's bottom edge
 var tail_target_y := 0.0     # y the tail points at (the cube's centre)
+var thinking_label := "Thinking"     # the footer word while waiting (Main changes it to "Looking that up" for a slow answer)
 var _dots_time := 0.0
 var _tween: Tween
 var _style: StyleBoxFlat
@@ -75,7 +76,7 @@ func _process(delta: float) -> void:
 		tail_y = tail_target_y - position.y
 	if mode == Mode.THINKING:
 		_dots_time += delta
-		footer.text = "Thinking" + ".".repeat(int(_dots_time * 3.0) % 4)
+		footer.text = thinking_label + ".".repeat(int(_dots_time * 3.0) % 4)
 	elif mode == Mode.LISTENING:
 		# a persistent, pulsing microphone indicator while the mic is open
 		_dots_time += delta
@@ -117,6 +118,7 @@ func show_followup(prompt: String, bye_phrase: String, hotkey: String) -> void:
 
 
 func show_thinking(question: String) -> void:
+	thinking_label = "Thinking"
 	_set_mode(Mode.THINKING)
 	header.text = "You asked"
 	_set_body(question)

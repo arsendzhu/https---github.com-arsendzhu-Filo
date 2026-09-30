@@ -46,6 +46,8 @@ func _run() -> void:
 	test_passthrough_covers_controls()
 	await _test_mute_over_ipc()
 	await _test_typing_over_ipc()
+	_test_status_pill_follows_the_app()
+	await test_barge_in_stops_tts()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -218,3 +220,85 @@ func _test_control_bar_without_main() -> void:
 	bar.type_button._gui_input(ev)
 	check(clicks[0] == 1, "a left-button release on a control emits `pressed`")
 	bar.queue_free()
+
+
+# -------------------------------------------------------------------- status + barge-in
+
+func _test_status_pill_follows_the_app() -> void:
+	main.mic_muted = false
+	main.controls.mic_button.set_muted(false)
+	main._error_until = 0.0
+	main._heard_until = 0.0
+	var seen := {}
+	for st in ["LISTENING", "THINKING", "ANSWERING", "TYPING", "IDLE"]:
+		main.app_state = main.AppState[st]
+		main.controls.status.set_kind(main._status_kind())
+		seen[st] = main.controls.status.label()
+	check(seen == {"LISTENING": "Listening", "THINKING": "Thinking", "ANSWERING": "Speaking", "TYPING": "Typing", "IDLE": "Ready"}, "the control bar's status follows the app state: " + str(seen))
+	main.mic_muted = true
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Mic muted", "muting the microphone shows 'Mic muted'")
+	main.mic_muted = false
+	main._heard_until = Time.get_ticks_msec() / 1000.0 + 5.0
+	main.app_state = main.AppState.THINKING
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Heard you", "right after a transcript arrives the status says it was heard")
+	main._heard_until = 0.0
+	main._show_error("test error")
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Problem", "an error shows 'Problem'")
+	main._error_until = 0.0
+	main.app_state = main.AppState.THINKING
+	main.pipeline.current_route = "tool_loop"
+	main._on_ack_timeout()
+	check(main.bubble.thinking_label == "Looking that up", "a slow tool-loop answer changes the wait message to 'Looking that up'")
+	main.pipeline.current_route = ""
+	main.bubble.thinking_label = "Thinking"
+	main._on_ack_timeout()
+	check(main.bubble.thinking_label == "Thinking", "a fast or non-tool route gets no acknowledgement")
+
+
+## Pressing the talk hotkey or saying the wake phrase while Filo talks (or is about to) stops it at once and
+## resets the pipeline: no stale 'finished', no tail spoken later, no late answer overwriting the new turn.
+func test_barge_in_stops_tts() -> void:
+	var sp: Speaker = main.speaker
+	var cancelled := [0]
+	var finished := [0]
+	sp.cancelled.connect(func(_i: int) -> void: cancelled[0] += 1)
+	sp.finished.connect(func(_i: int) -> void: finished[0] += 1)
+	var long_text := "This is a long answer that takes quite a while to say out loud, so there is time to interrupt it."
+	# 1) the hotkey while an answer is being spoken
+	main._set_state(main.AppState.ANSWERING)
+	main._speak(long_text, "answer")
+	check(sp.is_speaking(), "barge-in setup: Filo is speaking")
+	var token: int = main._answer_token
+	main._on_hotkey_down()
+	check(not sp.is_speaking(), "the hotkey stops the speech in the same frame")
+	check(cancelled[0] == 1 and main.app_state == main.AppState.LISTENING, "the speech is cancelled once and Filo is listening")
+	check(main._answer_token == token + 1 and main.speech_watchdog.is_stopped() and main._speech_kind == "", "the pipeline is reset: answer superseded, watchdog stopped, speech bookkeeping cleared")
+	await create_timer(0.7).timeout
+	check(finished[0] == 0, "no stale 'finished' arrives after the interruption (it would trigger a reprompt)")
+	# 2) the wake phrase while a streamed head is speaking and its tail is queued
+	main._set_state(main.AppState.ANSWERING)
+	main._speak("Dodge its charges and stay near the platforms.", "answer", true)
+	sp.append("Then kill the servants when the second phase starts.")
+	check(sp.is_speaking() and sp._tail_text != "", "barge-in setup 2: a head is speaking with a tail queued")
+	main._on_wake_word("hey filo")
+	check(not sp.is_speaking() and sp._tail_text == "" and not sp._more_expected, "saying the wake phrase stops the head and drops the queued tail")
+	await create_timer(0.7).timeout
+	check(finished[0] == 0 and cancelled[0] == 2, "the tail is never spoken afterwards (cancelled %d, finished %d)" % [cancelled[0], finished[0]])
+	# 3) while an answer is still on its way (thinking): it must not surface later
+	main._set_state(main.AppState.THINKING)
+	var old_token: int = main._answer_token
+	main._on_hotkey_down()
+	check(main.app_state == main.AppState.LISTENING and main._answer_token == old_token + 1 and main.ack_timer.is_stopped(), "interrupting a pending answer supersedes it and stops the acknowledgement timer")
+	var streamed := {"head": ""}
+	main._on_streamed_head(old_token, "old question", "A late first sentence from the old answer arrives now.", streamed)
+	check(streamed.head == "" and main.app_state == main.AppState.LISTENING and not sp.is_speaking(), "a first sentence from the superseded answer is ignored")
+	# 4) the type button interrupts too
+	main._set_state(main.AppState.ANSWERING)
+	main._speak(long_text, "answer")
+	main._interrupt_speech()
+	check(not sp.is_speaking(), "_interrupt_speech() is safe to call at any time and stops everything")
+	main._interrupt_speech()
+	check(cancelled[0] == 3, "...and calling it again with nothing to stop does nothing")

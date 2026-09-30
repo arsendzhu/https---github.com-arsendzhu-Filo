@@ -31,6 +31,7 @@ func _init() -> void:
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
 	test_settings_persist_roundtrip()
+	await _test_status_and_ack()
 	await _test_prefetch()
 	await test_golden_questions_eval()
 	await _test_speaker_continuation()
@@ -1508,3 +1509,86 @@ func test_settings_persist_roundtrip() -> void:
 	check(cfg.get_value("tts.volume") == 100 and cfg.get_value("hotkey.key") == "f8" and cfg.get_value("default_profile") == "sekiro" and cfg.get_value("settings.spoiler_level") == "nudge", "settings are applied over the config")
 	for suffix in ["", ".corrupt", ".tmp"]:
 		DirAccess.remove_absolute(file + suffix)
+
+
+# ------------------------------------------------- status feedback + acknowledgement (Tier 1)
+
+func _test_status_and_ack() -> void:
+	# the status shown for every situation
+	var cases := [
+		["ASLEEP", false, false, false, "ready"], ["IDLE", false, false, false, "ready"], ["LISTENING", false, false, false, "listening"],
+		["THINKING", false, false, false, "thinking"], ["ANSWERING", false, false, false, "speaking"], ["TYPING", false, false, false, "typing"],
+		["LISTENING", true, false, false, "muted"], ["ANSWERING", true, false, false, "muted"],
+		["IDLE", false, true, false, "error"], ["THINKING", false, false, true, "heard"], ["ANSWERING", false, false, true, "speaking"],
+		["WAKING", false, false, false, "ready"],
+	]
+	for c in cases:
+		var kind := StatusPill.kind_for(c[0], c[1], c[2], c[3])
+		check(kind == c[4], "status for %s (muted=%s error=%s heard=%s) is '%s' (got '%s')" % [c[0], c[1], c[2], c[3], c[4], kind])
+	var pill := StatusPill.new()
+	pill._ready()
+	pill.set_kind("thinking")
+	check(pill.label() == "Thinking" and pill.mouse_filter == Control.MOUSE_FILTER_IGNORE, "the pill names the state and never takes clicks")
+	pill.set_kind("bogus")
+	check(pill.kind == "thinking", "an unknown kind is ignored")
+	pill.free()
+	# acknowledgements: never the same phrase twice in a row, stable cache names, only when audible
+	var phrases := ["Let me check that.", "One moment.", "Looking that up."]
+	var last := ""
+	var repeats := 0
+	for i in 40:
+		var pick := Speaker.pick_ack(phrases, last, i * 7 + 3)
+		if pick == last:
+			repeats += 1
+		last = pick
+	check(repeats == 0 and Speaker.pick_ack([], "", 1) == "" and Speaker.pick_ack(["Only."], "Only.", 5) == "Only.", "acknowledgement phrases do not repeat back to back")
+	check(Speaker.ack_cache_name("One moment.", "af_heart", 1.05) == Speaker.ack_cache_name("One moment.", "af_heart", 1.05) and Speaker.ack_cache_name("One moment.", "af_heart", 1.05) != Speaker.ack_cache_name("One moment.", "am_michael", 1.05) and Speaker.ack_cache_name("One moment.", "af_heart", 1.05) != Speaker.ack_cache_name("One moment.", "af_heart", 1.2), "a cached clip is keyed by phrase, voice and speed")
+	var sp := Speaker.new()
+	root.add_child(sp)
+	sp._ack_player = AudioStreamPlayer.new()
+	sp.add_child(sp._ack_player)
+	sp.enabled = true
+	sp.available = false
+	sp.kokoro_ready = false
+	check(not sp.play_ack() and sp.ack_count == 0, "no acknowledgement when no voice is available (simulated speech)")
+	sp.kokoro_ready = true
+	check(not sp.play_ack(), "no acknowledgement while its clip is not ready yet")
+	var wav_rate := 24000
+	var pcm := PackedByteArray()
+	pcm.resize(4800 * 2)
+	var wav := PackedByteArray()
+	wav.resize(44 + pcm.size())
+	_write_ascii(wav, 0, "RIFF")
+	wav.encode_u32(4, 36 + pcm.size())
+	_write_ascii(wav, 8, "WAVE")
+	_write_ascii(wav, 12, "fmt ")
+	wav.encode_u32(16, 16)
+	wav.encode_u16(20, 1)
+	wav.encode_u16(22, 1)
+	wav.encode_u32(24, wav_rate)
+	wav.encode_u32(28, wav_rate * 2)
+	wav.encode_u16(32, 2)
+	wav.encode_u16(34, 16)
+	_write_ascii(wav, 36, "data")
+	wav.encode_u32(40, pcm.size())
+	for phrase in sp.acknowledgements:
+		sp._ack_cache[phrase] = Speaker._parse_wav(wav)
+	check(sp.play_ack() and sp.ack_count == 1 and sp.last_ack != "", "with a cached clip an acknowledgement is played: '%s'" % sp.last_ack)
+	var first := sp.last_ack
+	sp.stop_ack()
+	check(sp.play_ack() and sp.last_ack != first, "...and the next one is different")
+	sp.set_muted(true)
+	sp.stop_ack()
+	check(not sp.play_ack(), "nothing is said while the voice is muted")
+	sp.set_muted(false)
+	sp.play_ack()
+	sp.kokoro_ready = false             # no network in a unit test: the answer below is spoken by the simulated voice
+	sp._player = AudioStreamPlayer.new()
+	sp.add_child(sp._player)
+	sp._sim_timer = Timer.new()
+	sp._sim_timer.one_shot = true
+	sp.add_child(sp._sim_timer)
+	sp.speak("The real answer starts now.")
+	check(not sp._ack_player.playing, "starting the answer cuts an acknowledgement that is still playing")
+	sp.stop()
+	sp.queue_free()

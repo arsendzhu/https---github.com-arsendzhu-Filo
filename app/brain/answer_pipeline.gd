@@ -26,6 +26,7 @@ var max_history: int:
 var session_context: Dictionary = {}   # Phase 1+: last_area, last_boss, ...
 var pattern_game_local_confidence := 0.8   # notes must be this sure to answer about a game we only guessed from the wording
 var _req_seq := 0
+var current_route := ""                # "" while no question is being routed; "tool_loop" while the research agent works
 
 
 func setup(config: FiloConfig, game_profile: GameProfile) -> void:
@@ -122,6 +123,13 @@ func web_label() -> String:
 ## `on_sentence`: optional func(sentence: String), called while the tool-loop model is still writing its answer
 ## as soon as the first complete sentence exists (so speech can start early). Only the tool-loop route streams.
 func ask(question: String, on_sentence: Callable = Callable()) -> Dictionary:
+	current_route = ""
+	var result: Dictionary = await _ask_routed(question, on_sentence)
+	current_route = ""
+	return result
+
+
+func _ask_routed(question: String, on_sentence: Callable) -> Dictionary:
 	_req_seq += 1
 	var tag := "req %d" % _req_seq
 	var kind := QueryRouter.classify(question)
@@ -178,6 +186,7 @@ func ask(question: String, on_sentence: Callable = Callable()) -> Dictionary:
 		FiloLog.info("[%s] route: standard fallback - the tool loop is unavailable (%s)" % [tag, _research_unavailable_reason()])
 	else:
 		FiloLog.info("[%s] route: tool loop - %s" % [tag, mismatch if mismatch != "" else "no confident local answer (confidence %.2f < %.2f)" % [confidence, threshold]])
+		current_route = "tool_loop"
 		var hints := {"force_tool": true, "wiki_query": rw.wiki, "web_query": rw.web, "game": game_name, "tag": tag, "on_sentence": on_sentence}
 		var rr: Dictionary = await research.answer(user_content(question, passages, rw, game_name), game_name, hints)
 		if rr.ok:

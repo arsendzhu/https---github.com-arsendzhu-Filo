@@ -15,6 +15,7 @@ var mic_button: MicToggle
 var sound_button: SoundToggle
 var mode_button: ModeToggle
 var type_button: TypeButton
+var status: StatusPill
 var rest_alpha := 0.9
 
 
@@ -40,6 +41,8 @@ func _ready() -> void:
 	row.mouse_filter = MOUSE_FILTER_IGNORE
 	row.add_theme_constant_override("separation", 8)
 	panel.add_child(row)
+	status = StatusPill.new()
+	row.add_child(status)
 	mic_button = MicToggle.new()
 	mic_button.name = "MicButton"
 	sound_button = SoundToggle.new()

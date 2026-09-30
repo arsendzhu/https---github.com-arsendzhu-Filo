@@ -48,6 +48,14 @@ var _word_starts: PackedInt32Array = PackedInt32Array()
 var _next_word := 0
 var _speech_duration := 0.0
 var _root := ""
+# Short "let me check that" clips played when an answer is slow (pre-generated at start-up, cached on disk).
+var acknowledgements: Array = ["Let me check that.", "One moment.", "Looking that up.", "Let me see."]
+var last_ack := ""
+var ack_count := 0
+var _ack_cache := {}                 # phrase -> parsed wav
+var _ack_player: AudioStreamPlayer
+var _ack_system := false             # the current acknowledgement is being spoken by the system voice (utterance id -1)
+var _rng := RandomNumberGenerator.new()
 # One logical utterance can arrive in two parts: a head (the first sentence, spoken as soon as it exists) and a
 # tail (the rest, appended later). Callers still see ONE started ... finished.
 var _more_expected := false          # the head was started with more to come (append / end_stream)
@@ -69,6 +77,10 @@ func setup(cfg: FiloConfig) -> void:
 	kokoro_voice = str(cfg.get_value("tts.kokoro.voice", "af_heart"))
 	kokoro_speed = float(cfg.get_value("tts.kokoro.speed", 1.05))
 	kokoro_url = "http://127.0.0.1:%d" % int(cfg.get_value("tts.kokoro.port", 47823))
+	var acks = cfg.get_value("tts.acknowledgements", acknowledgements)
+	if typeof(acks) == TYPE_ARRAY:
+		acknowledgements = acks
+	_rng.randomize()
 	_root = FiloConfig.project_root()
 	available = DisplayServer.has_feature(DisplayServer.FEATURE_TEXT_TO_SPEECH)
 	if available and enabled:
@@ -88,6 +100,9 @@ func setup(cfg: FiloConfig) -> void:
 	_player.name = "KokoroPlayer"
 	add_child(_player)
 	_player.finished.connect(_on_player_finished)
+	_ack_player = AudioStreamPlayer.new()
+	_ack_player.name = "AckPlayer"
+	add_child(_ack_player)
 	if enabled and provider in ["auto", "kokoro"]:
 		_start_kokoro()
 
@@ -132,7 +147,7 @@ func active_provider() -> String:
 
 ## `expect_more`: this is only the first part of the answer; the rest follows with append() (or end_stream()).
 func speak(text: String, expect_more: bool = false) -> int:
-	stop()
+	stop()                            # also cuts an acknowledgement that is still playing
 	_reset_continuation()
 	_full_text = text                  # the head; boundary offsets for an appended tail are counted from its end
 	_more_expected = expect_more
@@ -152,6 +167,7 @@ func speak(text: String, expect_more: bool = false) -> int:
 ## Stops the current utterance and reports it as cancelled (a deliberate
 ## interruption — the hotkey pressed mid-answer, a new question, dismissal).
 func stop() -> void:
+	stop_ack()
 	if _current_id == 0:
 		return
 	var id := _cleanup()
@@ -335,6 +351,8 @@ func _on_tts_ended(id: int) -> void:
 
 
 func _on_tts_canceled(id: int) -> void:
+	if id == -1:
+		return                        # an acknowledgement, not an utterance
 	if id == _current_id:
 		_current_id = 0
 	cancelled.emit(id)
@@ -383,6 +401,7 @@ func _check_kokoro_health() -> void:
 		kokoro_ready = true
 		_health_timer.stop()
 		FiloLog.info("Kokoro voice ready (%s) — local neural voice in use" % kokoro_voice)
+		_pregenerate_acks()
 
 
 ## One HTTP request for the whole utterance, then one continuous playback.
@@ -576,3 +595,93 @@ func _sim_step() -> void:
 	var word_len := maxi(next_start - start, 1)
 	_sim_index += 1
 	_sim_timer.start(0.09 + 0.045 * word_len)
+
+
+# ---------------------------------------------------------------- acknowledgements
+
+## One of the acknowledgement phrases, never the one used last time (`roll` picks among the others).
+static func pick_ack(phrases: Array, last: String, roll: int) -> String:
+	if phrases.is_empty():
+		return ""
+	var options := phrases.filter(func(p) -> bool: return str(p) != last)
+	if options.is_empty():
+		options = phrases
+	return str(options[posmod(roll, options.size())])
+
+
+## Stable file name for a cached clip: the clip depends on the phrase, the voice and the speed.
+static func ack_cache_name(phrase: String, voice: String, speed: float) -> String:
+	return "ack_%s.wav" % ("%s|%s|%.2f" % [phrase, voice, speed]).md5_text().left(16)
+
+
+## Synthesizes each phrase once (or loads it from user://ack_cache), in the background, so a clip is ready
+## the moment an answer turns out to be slow. Nothing is spoken here.
+func _pregenerate_acks() -> void:
+	var dir := "user://ack_cache"
+	DirAccess.make_dir_recursive_absolute(dir)
+	var made := 0
+	for phrase in acknowledgements:
+		var p := str(phrase)
+		var path := dir.path_join(ack_cache_name(p, kokoro_voice, kokoro_speed))
+		var bytes := PackedByteArray()
+		if FileAccess.file_exists(path):
+			bytes = FileAccess.get_file_as_bytes(path)
+		else:
+			var http := HTTPRequest.new()
+			http.timeout = 30.0
+			add_child(http)
+			var body := JSON.stringify({"text": p, "voice": kokoro_voice, "speed": kokoro_speed})
+			if http.request(kokoro_url + "/synthesize", PackedStringArray(["Content-Type: application/json"]), HTTPClient.METHOD_POST, body) != OK:
+				http.queue_free()
+				continue
+			var res: Array = await http.request_completed
+			http.queue_free()
+			if res[0] == HTTPRequest.RESULT_SUCCESS and res[1] == 200:
+				bytes = res[3]
+				var f := FileAccess.open(path, FileAccess.WRITE)
+				if f != null:
+					f.store_buffer(bytes)
+		var parsed := _parse_wav(bytes) if not bytes.is_empty() else {}
+		if not parsed.is_empty():
+			_ack_cache[p] = parsed
+			made += 1
+	FiloLog.info("Acknowledgement clips ready: %d of %d" % [made, acknowledgements.size()])
+
+
+## "Let me check that." Only while nothing else is being said; returns whether anything audible started.
+func play_ack() -> bool:
+	if acknowledgements.is_empty() or _current_id != 0:
+		return false
+	var phrase := pick_ack(acknowledgements, last_ack, _rng.randi())
+	match active_provider():
+		"kokoro":
+			if not _ack_cache.has(phrase):
+				return false
+			last_ack = phrase
+			ack_count += 1
+			var parsed: Dictionary = _ack_cache[phrase]
+			var stream := AudioStreamWAV.new()
+			stream.format = AudioStreamWAV.FORMAT_16_BITS
+			stream.mix_rate = int(parsed.rate)
+			stream.stereo = false
+			stream.data = parsed.data
+			_ack_player.stream = stream
+			_ack_player.volume_db = linear_to_db(clampf(volume / 100.0, 0.05, 1.0))
+			_ack_player.play()
+			return true
+		"system":
+			last_ack = phrase
+			ack_count += 1
+			_ack_system = true
+			DisplayServer.tts_speak(phrase, voice_id, volume, pitch, rate, -1, false)
+			return true
+	return false
+
+
+func stop_ack() -> void:
+	if _ack_player != null and _ack_player.playing:
+		_ack_player.stop()
+	if _ack_system:
+		_ack_system = false
+		if available and enabled:
+			DisplayServer.tts_stop()

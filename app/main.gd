@@ -37,6 +37,7 @@ var idle_timer: Timer
 var linger_timer: Timer
 var final_timer: Timer
 var speech_watchdog: Timer
+var ack_timer: Timer
 var apps_timer: Timer
 var helper_watchdog: Timer
 var hint_tween: Tween
@@ -63,6 +64,8 @@ var mic_mute_confirmed := false # the helper acknowledged the last set_mute
 var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
 var _mute_deadline := 0.0
 var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _error_until := 0.0          # seconds (ticks) until which the status shows a problem
+var _heard_until := 0.0          # ...and "Heard you"
 var _vocab_table: Dictionary = {}
 var _vocab_sent := ""
 var _speech_kind := ""          # answer | reprompt | farewell | info
@@ -197,6 +200,7 @@ func _setup_timers() -> void:
 	linger_timer = _make_timer("LingerTimer", true, _on_linger_timeout)
 	final_timer = _make_timer("FinalTimer", true, _on_final_timeout)
 	speech_watchdog = _make_timer("SpeechWatchdog", true, _on_speech_watchdog)
+	ack_timer = _make_timer("AckTimer", true, _on_ack_timeout)
 	apps_timer = _make_timer("AppsTimer", false, _on_apps_tick)
 	helper_watchdog = _make_timer("HelperWatchdog", true, _on_helper_watchdog)
 
@@ -225,6 +229,7 @@ func _process(_delta: float) -> void:
 	_sync_scale()
 	_layout_controls()
 	_apply_window_mode()
+	controls.status.set_kind(_status_kind())
 	if _mute_deadline > 0.0 and Time.get_ticks_msec() / 1000.0 > _mute_deadline:
 		_mute_deadline = 0.0
 		if bridge != null and helper_connected and not mic_mute_confirmed:
@@ -413,12 +418,8 @@ func _on_hotkey_down() -> void:
 		AppState.TYPING:
 			input_panel.close()
 			_enter_listening()
-		AppState.ANSWERING:
-			_answer_token += 1        # a still-streaming answer must not overwrite what happens next
-			speaker.stop()
-			_enter_listening()
-		AppState.THINKING:
-			_answer_token += 1
+		AppState.ANSWERING, AppState.THINKING:
+			_interrupt_speech()
 			_enter_listening()
 		_:
 			_enter_listening()
@@ -440,12 +441,8 @@ func _on_wake_word(_phrase: String) -> void:
 		AppState.TYPING:
 			input_panel.close()
 			_enter_listening()
-		AppState.ANSWERING:
-			_answer_token += 1        # a still-streaming answer must not overwrite what happens next
-			speaker.stop()
-			_enter_listening()
-		AppState.THINKING:
-			_answer_token += 1
+		AppState.ANSWERING, AppState.THINKING:
+			_interrupt_speech()
 			_enter_listening()
 		AppState.LISTENING:
 			pass
@@ -558,6 +555,7 @@ func _handle_final(text: String) -> void:
 			bubble.show_info("I didn't catch that — %s." % ("say “%s” again or hold %s" % [str(cfg.get_value("wake_word.phrase", "hey filo")), cfg.hotkey_label()] if _wake_enabled() else "hold %s and try again" % cfg.hotkey_label()))
 			_set_state(AppState.IDLE)
 		return
+	_heard_until = Time.get_ticks_msec() / 1000.0 + 1.3
 	if bool(cfg.get_value("speech.term_correction", true)):
 		var fixed := TermCorrector.correct(q, _vocabulary())
 		if not fixed.changes.is_empty():
@@ -656,12 +654,15 @@ func _ask(question: String, source: String = "voice") -> void:
 	_answer_token += 1
 	var token := _answer_token
 	FiloLog.info("QUESTION: " + question)
+	if bool(cfg.get_value("behavior.acknowledge", true)):
+		ack_timer.start(float(cfg.get_value("behavior.ack_after_seconds", 1.2)))
 	# The first sentence of a streamed answer is spoken while the rest is still being written.
 	var streamed := {"head": ""}
 	var on_sentence := Callable()
 	if bool(cfg.get_value("tts.stream_first_sentence", true)):
 		on_sentence = func(sentence: String) -> void: _on_streamed_head(token, question, sentence, streamed)
 	var result: Dictionary = await pipeline.ask(question, on_sentence)
+	ack_timer.stop()
 	if token != _answer_token or (streamed.head == "" and app_state != AppState.THINKING):
 		FiloLog.debug("Answer discarded (superseded)")
 		return
@@ -684,6 +685,34 @@ func _ask(question: String, source: String = "voice") -> void:
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))
 	_speak(result.spoken, "answer")
+
+
+## Barge-in: stop whatever Filo is saying (or about to say) right now, forget the answer that is still on its
+## way and reset the speech bookkeeping, so the next thing that happens starts from a clean state.
+func _interrupt_speech() -> void:
+	_answer_token += 1            # a pending or still-streaming answer must not overwrite what happens next
+	ack_timer.stop()
+	speech_watchdog.stop()
+	_speech_kind = ""
+	speaker.stop()                # cancels the head, a queued tail and an acknowledgement in one go
+	FiloLog.debug("Speech interrupted")
+
+
+## The answer is taking a while and needs the tool loop: say "let me check that" and show it.
+func _on_ack_timeout() -> void:
+	if app_state != AppState.THINKING or pipeline.current_route != "tool_loop":
+		return
+	bubble.thinking_label = "Looking that up"
+	if speaker.play_ack():
+		FiloLog.info("Acknowledgement: '%s' (the answer is taking longer than %.1f s)" % [speaker.last_ack, float(cfg.get_value("behavior.ack_after_seconds", 1.2))])
+	else:
+		FiloLog.debug("Acknowledgement not spoken (voice muted or its clip is not ready)")
+
+
+## The status shown in the control bar right now.
+func _status_kind() -> String:
+	var now := Time.get_ticks_msec() / 1000.0
+	return StatusPill.kind_for(AppState.keys()[app_state], mic_muted, now < _error_until, now < _heard_until)
 
 
 func _on_streamed_head(token: int, question: String, sentence: String, streamed: Dictionary) -> void:
@@ -812,6 +841,7 @@ func _pick(options, fallback: String) -> String:
 
 
 func _show_error(message: String) -> void:
+	_error_until = Time.get_ticks_msec() / 1000.0 + 6.0
 	bubble.show_error(message)
 	mascot.animator.play_error()
 	_set_state(AppState.IDLE, false)
@@ -1039,8 +1069,7 @@ func _on_type_button_pressed() -> void:
 		AppState.TYPING:
 			input_panel.close()
 		_:
-			_answer_token += 1
-			speaker.stop()
+			_interrupt_speech()
 			if bridge:
 				bridge.send({"cmd": "listen_stop"})
 			_pending_final = false

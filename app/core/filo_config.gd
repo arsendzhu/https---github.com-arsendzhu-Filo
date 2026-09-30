@@ -79,6 +79,8 @@ const DEFAULTS := {
 		"pitch": 1.0,
 		"volume": 70,
 		"kokoro": {"voice": "af_heart", "speed": 1.05, "port": 47823},
+		"stream_first_sentence": true,
+		"acknowledgements": ["Let me check that.", "One moment.", "Looking that up.", "Let me see."],
 	},
 	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420},
 	"mascot": {"internal_resolution": 96, "size": 200, "dither": 0.09, "vertex_jitter": 0.0},
@@ -88,6 +90,8 @@ const DEFAULTS := {
 		"greet_on_launch": true,
 		"greet_linger": 8.0,
 		"reprompt": true,
+		"acknowledge": true,          # say "let me check that" when a tool-loop answer takes longer than ack_after_seconds
+		"ack_after_seconds": 1.2,
 		"followup_listen_seconds": 30,
 		"conversation_turns": 4,
 		"reprompt_phrases": ["Anything else?", "Want to know more?", "What else can I help with?", "Need anything else?", "Ask me more if you like."],
