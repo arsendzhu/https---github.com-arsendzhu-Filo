@@ -171,4 +171,10 @@ func apply_to(cfg: FiloConfig) -> void:
 		cfg.data["default_profile"] = str(get_value("game"))
 	if str(get_value("overlay_corner")) != str(SCHEMA.overlay_corner.default):
 		cfg.data["overlay"]["corner"] = str(get_value("overlay_corner"))
+	var sc := float(get_value("overlay_scale"))
+	if not is_equal_approx(sc, 1.0):           # size is applied at start-up (the cube's render resolution depends on it)
+		cfg.data["mascot"]["size"] = float(cfg.data["mascot"]["size"]) * sc
+		cfg.data["overlay"]["width"] = float(cfg.data["overlay"]["width"]) * sc
+		cfg.data["overlay"]["height"] = float(cfg.data["overlay"]["height"]) * sc
+	cfg.data["overlay"]["offset"] = get_value("overlay_offset").duplicate()
 	cfg.data["settings"] = values.duplicate(true)

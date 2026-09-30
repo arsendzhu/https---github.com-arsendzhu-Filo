@@ -24,6 +24,8 @@ var tail_y := 40.0
 var tail_anchor_x := 0.0     # x of the tail tip, set by Main every frame
 var bottom_anchor_y := 0.0   # y of the bubble's bottom edge
 var tail_target_y := 0.0     # y the tail points at (the cube's centre)
+var text_scale := 1.0
+var high_contrast := false
 var thinking_label := "Thinking"     # the footer word while waiting (Main changes it to "Looking that up" for a slow answer)
 var _dots_time := 0.0
 var _tween: Tween
@@ -57,6 +59,21 @@ func _ready() -> void:
 	vbox.add_child(footer)
 	visible = false
 	modulate.a = 0.0
+
+
+## Accessibility: larger text and a high-contrast palette (pure white on black, bright accent).
+func apply_accessibility(scale: float, contrast: bool) -> void:
+	text_scale = clampf(scale, 0.8, 2.0)
+	high_contrast = contrast
+	header.add_theme_font_size_override("font_size", roundi(12.0 * text_scale))
+	body.add_theme_font_size_override("font_size", roundi(15.0 * text_scale))
+	footer.add_theme_font_size_override("font_size", roundi(12.0 * text_scale))
+	max_width = 340.0 * text_scale
+	_style.bg_color = Color.BLACK if contrast else Color(INK, 0.94)
+	_style.border_color = Color.WHITE if contrast else CREAM
+	header.add_theme_color_override("font_color", Color("e6e6e6") if contrast else DIM)
+	body.add_theme_color_override("font_color", Color.WHITE if contrast else BODY_COLOR)
+	footer.add_theme_color_override("font_color", Color("ffe14d") if contrast else ACCENT)
 
 
 func _make_label(font_size: int, color: Color) -> Label:
@@ -222,8 +239,8 @@ func _set_mode(m: int) -> void:
 	_dots_time = 0.0
 	header.visible = true
 	body.visible = true
-	header.add_theme_color_override("font_color", ERROR_COLOR if m == Mode.ERROR else DIM)
-	_style.border_color = ERROR_COLOR if m == Mode.ERROR else CREAM
+	header.add_theme_color_override("font_color", ERROR_COLOR if m == Mode.ERROR else (Color("e6e6e6") if high_contrast else DIM))
+	_style.border_color = ERROR_COLOR if m == Mode.ERROR else (Color.WHITE if high_contrast else CREAM)
 	body.visible_characters = -1
 	if was_hidden:
 		_appear()

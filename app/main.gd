@@ -126,6 +126,7 @@ func _ready() -> void:
 	mascot.animator.sleep_finished.connect(_on_sleep_finished)
 	mascot.animator.error_finished.connect(_on_error_finished)
 	mascot.animator.set_glint(bool(cfg.get_value("screen_reading.enabled", false)))
+	_apply_settings_live()
 
 	var showcase_mode := args.has("showcase")
 	if not showcase_mode and bool(cfg.get_value("helper.enabled", true)):
@@ -324,6 +325,20 @@ func _save_setting(key: String, value) -> void:
 		return
 	if settings.set_value(key, value):
 		settings.save()
+
+
+## Applies the user settings that can change while running (opacity, captions, accessibility, volume, corner).
+func _apply_settings_live() -> void:
+	cfg.data["settings"] = settings.values.duplicate(true)
+	modulate.a = float(settings.get_value("overlay_opacity"))
+	bubble.apply_accessibility(float(settings.get_value("text_scale")), bool(settings.get_value("high_contrast")))
+	speaker.volume = int(settings.get_value("volume"))
+	var corner := str(settings.get_value("overlay_corner"))
+	if corner != str(cfg.get_value("overlay.corner", "bottom_right")):
+		cfg.data["overlay"]["corner"] = corner
+		cfg.data["overlay"]["offset"] = [0.0, 0.0]
+		win_info = OverlayWindow.apply_scale(get_window(), cfg, float(win_info.scale))
+		mascot.position = Vector2(float(win_info.size_pts.x) - mascot.display_pts - 8.0, float(win_info.size_pts.y) - mascot.display_pts - 8.0)
 
 
 func _mute_hotkey_enabled() -> bool:
@@ -581,6 +596,12 @@ func _on_typed_submitted(text: String) -> void:
 		_farewell()
 		return
 	var lower := text.to_lower()
+	var setting := SettingCommands.apply(settings, text)
+	if setting.handled:
+		bubble.show_info(str(setting.message))
+		if setting.ok:
+			_apply_settings_live()
+		return
 	if lower == "/glint":
 		var on := not mascot.animator.glint
 		mascot.animator.set_glint(on)
@@ -593,7 +614,7 @@ func _on_typed_submitted(text: String) -> void:
 		quit()
 		return
 	if lower == "/help":
-		bubble.show_info("%s, or tap %s to type. Commands: /glint, /sleep, /quit, /help." % [_activation_sentence(), cfg.hotkey_label()])
+		bubble.show_info("%s, or tap %s to type. Commands: /glint, /sleep, /quit, /help.  %s" % [_activation_sentence(), cfg.hotkey_label(), SettingCommands.HELP])
 		return
 	_ask(text, "typed")
 

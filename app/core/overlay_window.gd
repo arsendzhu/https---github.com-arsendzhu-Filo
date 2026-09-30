@@ -42,9 +42,21 @@ static func apply_scale(window: Window, cfg: FiloConfig, scale: float) -> Dictio
 		"top_left":
 			pos.x = usable.position.x + margin_px
 			pos.y = usable.position.y + margin_px
+	var offset = cfg.get_value("overlay.offset", [0.0, 0.0])
+	if typeof(offset) == TYPE_ARRAY and offset.size() == 2:
+		pos += Vector2i(roundi(float(offset[0]) * scale), roundi(float(offset[1]) * scale))
+	pos = clamp_to_screen(pos, size_px, usable)
 	window.position = pos
 	FiloLog.info("Overlay window: %dx%d px at %s (scale %.1f, screen usable %s)" % [size_px.x, size_px.y, str(pos), scale, str(usable)])
 	return {"scale": scale, "size_px": size_px, "size_pts": Vector2(w_pts, h_pts)}
+
+
+## Keeps the window (at least mostly) on the screen after a saved offset or a display change.
+static func clamp_to_screen(pos: Vector2i, size_px: Vector2i, usable: Rect2i) -> Vector2i:
+	if usable.size.x <= 0 or usable.size.y <= 0:
+		return pos
+	var keep := 120     # px of the window that must stay visible
+	return Vector2i(clampi(pos.x, usable.position.x - size_px.x + keep, usable.end.x - keep), clampi(pos.y, usable.position.y - size_px.y + keep, usable.end.y - keep))
 
 
 ## Click-through + never-focused when true (normal overlay mode). False while the

@@ -49,6 +49,7 @@ func _run() -> void:
 	_test_status_pill_follows_the_app()
 	await test_barge_in_stops_tts()
 	await _test_failures_are_spoken_and_shown()
+	_test_settings_commands_apply_live()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -322,3 +323,18 @@ func _test_failures_are_spoken_and_shown() -> void:
 	main._on_helper_error("mic_denied", "Microphone access is off.")
 	check(main.speaker.last_text.contains("permission"), "microphone permission denied is spoken: '%s'" % main.speaker.last_text)
 	main.speaker.stop()
+
+
+func _test_settings_commands_apply_live() -> void:
+	main._on_typed_submitted("/opacity 55")
+	check(is_equal_approx(main.modulate.a, 0.55) and main.bubble.body.text.begins_with("Opacity 55"), "typing /opacity 55 dims the overlay at once and confirms in the bubble")
+	main._on_typed_submitted("/text 130")
+	main._on_typed_submitted("/contrast on")
+	check(main.bubble.high_contrast and is_equal_approx(main.bubble.text_scale, 1.3), "/text and /contrast take effect at once")
+	main._on_typed_submitted("/spoilers full")
+	check(main.pipeline.default_level() == "full", "/spoilers changes what the next answer gives away")
+	main._on_typed_submitted("/opacity 100")
+	main._on_typed_submitted("/text 100")
+	main._on_typed_submitted("/contrast off")
+	main._on_typed_submitted("/spoilers hint")
+	check(is_equal_approx(main.modulate.a, 1.0) and not main.bubble.high_contrast, "and back")
