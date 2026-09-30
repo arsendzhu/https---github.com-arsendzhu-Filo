@@ -1,6 +1,41 @@
 # Overnight progress
 
-Working branch: `overnight/0929-run` (never pushed). Gate: `./scripts/verify.sh` (runs `scripts/extra_checks.sh`, which runs `scripts/test.sh` and, later, `scripts/test_audio.sh`).
+Branch `overnight/0929-run` (see "Notes on git and incidents" for how it got published). Gate: `./scripts/verify.sh` -> **VERIFY: PASS** at the last run (it runs `scripts/extra_checks.sh` = `scripts/test.sh` + `scripts/test_audio.sh`, plus pytest, the key scan and the required-test names). Run `./scripts/verify.sh` to reproduce.
+
+## Plain summary
+
+**Root causes found.** (1) Filo did not use its tools for Terraria because the model was called with `tool_choice="auto"` and simply answered from memory, the loaded game (Sekiro) was assumed for every question (its notes were even used to answer a Terraria follow-up at confidence 1.00), the wiki mapping only knew a few games, and there was no routing or logging that said why. (2) The controls were children of the speech bubble (hidden until Filo speaks) and the click region was written in points into a pixel-based Godot property, so on this Retina display it never covered the buttons; typing also never handed focus back. (3) Speech was clipped because the audio engine was cold-started on every key press (~250 ms lost, no pre-roll), stopped the instant the key was released (no tail), stopped between wake-word sessions, ended questions on a fixed 1.5 s transcript timeout and did work on the audio thread; nothing told the recogniser the names of the game's bosses and items.
+
+**What changed.** Routing + game detection + forced/prefetched tool calls + wiki discovery for any game (WS1); an always-visible control bar with correct click-through, mic mute + hotkey, focus hand-back (WS2); pre-roll ring buffer, push-to-talk tail, VAD endpointing with a hangover, off-thread audio, debug audio dump, per-game vocabulary hints and a term corrector (WS3); prefetch, a persistent keep-alive connection, streaming with time-to-first-token, first-sentence speech, request pacing, token caps, a safe live benchmark (WS4); Tier 1-3 product work (status pill, acknowledgements, barge-in, spoiler levels, settings file, history/captions, drag/snap/opacity/auto-hide/panic, onboarding, doctor, accessibility, privacy doc).
+
+**Numbers (measured).**
+| | before | after |
+| --- | --- | --- |
+| unit checks (Godot) / UI+IPC checks / pytest / offline e2e scenarios | 304-386 / 0 / 0| 774 / 166 / 18 / 8 (2a-2h) |
+| word error rate, reference recogniser (faster-whisper base.en), late key press + early release | 0.535 (old capture path, modelled) | 0.155 (new capture; the recogniser's own ceiling on uncut speech) |
+| speech kept by the capture in the 10 scenarios | old path < 0.93 in the clipping ones | >= 99 % in all |
+| WER with per-game hotwords (uncut speech) / term corrector on recorded transcripts | 0.155 / 0.153 | 0.000 / 0.052 (optimistic: the vocabulary overlaps the fixtures, I saw the transcripts while writing the rules) |
+| idle CPU / memory, asleep (25 s) | 10.2 % / 194 MB (original commit) | 1.9 % / 239 MB |
+| model round trips for a researched answer (mock e2e) | 3 | 1 (prefetch) |
+| golden questions routed as expected / key terms present | - | 28/28 / 28/28 |
+
+**Could not verify (and why).** The live NIM benchmark (no `NVIDIA_API_KEY` in this shell and `.env` may not be read; `bench_live.py` is ready and tested: run it in the morning, see MANUAL_TESTS.md section 4) - so there is no baseline/final latency, no p50/p95 and no measured keyword accuracy against the real API, and whether NIM's models accept `tool_choice=required`; anything that needs the real microphone, real clicks or the rebuilt helper (mute, pre-roll/tail/VAD in the live capture, onboarding meter, panic hotkey, focus hand-back, drag): covered by unit/IPC/fixture tests and by MANUAL_TESTS.md; Apple's on-device recogniser accuracy (WER is for a reference recogniser fed with the capture code's output); GPU idle load; Kokoro acknowledgement clips (generated on first Kokoro start).
+
+**Chose not to do.** Hosted ASR (needs gRPC + unverified free scopes); an NIM-based transcript post-correction (cannot be justified without a live benchmark - the rule-based corrector is on by default, the LLM one does not exist); pronunciation overrides (mechanism only, no invented respellings); rebuilding/re-signing the installed helper app or restarting your running Filo (permissions; see MANUAL_TESTS.md step 0); auto-loading the model chain's dead default `deepseek-ai/deepseek-v4-flash` (HTTP 410 on the free tier).
+
+## Checklist (evidence in the sections below)
+- [x] Step 0 findings recorded
+- [x] Tool-use bug: root cause found and fixed, tests pass (`test_unknown_game_still_uses_tools`, e2e 2f)
+- [x] Any-game support via data-driven wiki mapping plus web fallback (`research.wikis` one-liners + discovery)
+- [x] UI controls visible on launch, clickable, mute and typing work end to end (`test_ui_controls_visible_on_launch`, `test_passthrough_covers_controls`, IPC round trips; real click in MANUAL_TESTS.md)
+- [x] Voice capture: pre-roll, hangover, non-blocking callback, debug audio dump
+- [x] STT improved and measured with fixtures (before/after WER, reference recogniser; the app's own recogniser not measurable overnight)
+- [x] Persistent client, streaming to TTS, warm-up, capped tokens, caching
+- [x] Fallback chain and 404/410/429 handling tested
+- [ ] Live baseline and final benchmark recorded - **not possible tonight** (no key in the environment); tool + instructions ready
+- [x] Tier 1 improvements done with tests
+- [x] Tier 2 and Tier 3 items each marked done / partial in this file
+- [x] Docs updated (config keys, models/games, tests, privacy, doctor)
 
 ## Step 0 - what the repo actually looks like (the task text assumed a Python backend; the code is different)
 
@@ -40,9 +75,6 @@ Interface rule from the task ("ask before breaking the Python<->Godot interface"
 
 ### Not verifiable overnight
 - Whether NIM's DeepSeek/Nemotron accept `tool_choice: "required"`: needs a live call (`scripts/bench_live.py`, only with the user's key). The code handles both outcomes (degrade + app-side forced search), so behaviour is correct either way; only latency differs.
-
-## Incident: one accidental live NIM call (logged as required by the rules)
-While building the UI test (workstream 2) I ran `app/tests/ui_tests.gd` once by hand without fake keys. The app loads the project's `.env` by itself (the normal mechanism), so two typed/voice test questions were answered by the real NIM (`provider=nim`, local-notes route: at most 2 chat requests). I did not read `.env`; the key was never printed. Fix: the UI test (and `scripts/test.sh` scenario 2g) now run with fake keys in the environment (environment beats `.env`) and every base URL pointed at a closed local port, so no test can reach a real API. The only live calls allowed remain `scripts/bench_live.py`'s.
 
 ## Workstream 2 - overlay controls missing / not clickable
 
@@ -110,8 +142,10 @@ Model size (uncut speech, WER / key-word recall): tiny.en 0.155 / 0.67, base.en 
 ### Tests
 `test_vad_preroll_and_hangover`, `test_speech_not_clipped` (tests/test_speech_pipeline.py, real synthesized speech through the Swift segmenter), `test_segmenter_selftest_on_synthetic_signals` (ring wrap-around, onset, hangover, pauses, noise, clicks, PTT, 48 kHz, 60-race replay-ordering test, endpointing, debug-dump pruning), `test_keywords_recovered_by_reference_recognizer` (end to end with faster-whisper), `_test_speech_terms` (vocabulary + corrector) in the Godot suite.
 
-## Note on git
-The branch `overnight/0929-run` was committed once by someone else with the message "Your message here" and published to `origin` (visible as `origin/overnight/0929-run`) while I was working; I never ran `git push` and did not touch remotes. That commit contains part of the prefetch work; my history continues on top of it.
+### Not done / decisions
+- Hosted ASR (NVIDIA Riva/Parakeet): needs gRPC streaming and its free-tier terms/scopes for the existing key could not be verified offline; not added.
+- AI (NIM) post-correction of transcripts: not implemented. It would need a live benchmark to justify enabling and none is possible overnight without the key; the rule-based corrector covers the measured cases at zero latency.
+- The installed helper app was **not** rebuilt (see MANUAL_TESTS.md step 0) and the microphone path has never run against real audio tonight: everything above is verified on synthetic/synthesized audio, compile checks and unit tests. MANUAL_TESTS.md section 3 says what to check with your voice.
 
 ## Workstream 4 - NIM speed with the same accuracy
 
@@ -146,10 +180,29 @@ Model chain from config (deepseek-v4.1-flash -> nemotron-3-super -> Claude) with
 | No focus stealing / performance | done | overlay is unfocusable except while the type box is open (ui test); asleep: the cube's render pass is off, 10 fps, low-processor mode. **Idle cost (25 s asleep, `scripts/measure_idle.sh`)**: original commit 10.2 % CPU / 194 MB; after workstreams 1-4 3.6 % / 243 MB; after the idle change **1.9 % CPU (peak 2.4 %) / 239 MB**. GPU load could not be sampled (no unprivileged API). Memory is higher than the original (+45 MB: control bar, tap/ring classes, vocabulary and session data; not investigated further). |
 | Failure UX | done | `FailureUX`: no microphone, microphone/speech permission denied, NIM down/slow, rate limited, no internet, wiki not found, bad/missing key, muted, recognition failure: each has a short spoken sentence (<= 14 words, no codes) and a visual message with what to do; the same complaint is not spoken twice within 20 s. `_test_failure_ux`, ui `_test_failures_are_spoken_and_shown` |
 
-Layout note: the activation hint used to overlap the wider control bar; it now sits to its left on two lines (found in a captured frame).
+### Tier 2 (all done)
+| item | status | evidence |
+| --- | --- | --- |
+| Spoiler control | done | levels hint -> nudge -> full (default hint, `settings.spoiler_level`, `/spoilers`); "tell me more" re-asks the previous question one level up, "spoil it" jumps to full; the bubble offers "tell me more" after a hint/nudge. `_test_spoiler_levels` |
+| Answer quality | done | long wiki pages are read by the section that answers the question (Strategy for "how do I beat", Drops, Location, Crafting ...; the page's opening lines + the section run, `WikipediaClient.select_page_text`), preferred hosts ranked first (`research.preferred_domains`, `WebTools.rank_results`), the prompt says to answer only from the tool text and to say plainly that the wiki does not cover it, the source page title shows in the bubble footer and URLs are never spoken. `_test_answer_quality` |
+| Spoken-style text | done | `SpeechNormalizer` (markdown/URLs out, HP/DPS/NPC/vs./e.g., ranges, percent, plus, times, thousands separators, per-word `tts.pronunciations` overrides) applied to what the voice is given while the bubble keeps the original; the reveal follows the words through a position map; sentence splitting via `SentenceStreamer.split_sentences`. The pronunciation table ships empty: I cannot listen to Kokoro overnight, so I did not invent respellings. `_test_speech_normalizer` |
+| Captions and history | done | `/captions on`: the answer stays (not replaced by the follow-up prompt) and fades after `behavior.caption_seconds`; history panel (list button, `/history`): the last 10 exchanges, text only, in memory, part of the clickable region. ui `_test_history_captions_panic` |
+| Overlay ergonomics | done | drag the status pill (snaps to corners within 90 pt, otherwise stays and is remembered as an offset, clamped on screen), `/opacity`, `/size` (applied at next start: the cube's render resolution depends on it), `/corner`, `/autohide`, panic hotkey `control+option+H` (third helper hotkey; hides, silences and mutes; restores the previous mic state), README note that exclusive full-screen games cannot show overlays. `test_passthrough_covers_controls`-style tests + `_test_drag_and_auto_hide`, `_test_history_captions_panic` |
+| Onboarding and setup | done | first run (or `/setup`): microphone picker (real CoreAudio devices from the helper, selected device applied to the audio engine and saved) with a live level meter, hotkey check, voice test, game picker; `.env.example` and the README setup section already existed. `_test_onboarding` (real bridge + fake helper), `tests/test_helper_mics.py` (real device listing). Not exercised with a real microphone. |
+| Doctor | done | this repo has no Python `filo` package, so `python -m filo doctor` is `python3 scripts/doctor.py` (Godot + project, helper + self-test, overlay extension, microphone, key present/never printed, NVIDIA model list vs the configured models, wikis, Filo running, voice, settings.json; PASS/FAIL/WARN/SKIP, exit 1 on FAIL, `--offline`). `tests/test_doctor.py` (against the local mock, never a live API) |
 
-## Workstream 3 - not done / decisions (continued)
-- Hosted ASR (NVIDIA Riva/Parakeet): needs gRPC streaming and its free-tier terms/scopes for the existing key could not be verified offline; not added.
-- AI (NIM) post-correction of transcripts: not implemented. It would need a live benchmark to justify enabling and none is possible overnight without the key; the rule-based corrector covers the measured cases at zero latency.
-- The installed helper app was **not** rebuilt (see MANUAL_TESTS.md step 0) and the microphone path has never run against real audio tonight: everything above is verified on synthetic/synthesized audio, compile checks and unit tests. MANUAL_TESTS.md section 3 says what to check with your voice.
+### Tier 3
+| item | status | evidence |
+| --- | --- | --- |
+| Game auto-detection | done (extended) | already present: the running apps' names -> profile (local only, no screenshots); now `/game <id>` picks a game by hand and switches detection off, `/game auto` turns it back on, and a detected game is no longer written to settings. `_test_setting_commands` |
+| Accessibility | done | `/text 80-200`, `/contrast on` (live), a typed equivalent for every control (`/mic`, `/voice`, `/followup`, `/type`, `/history`, `/setup`, `/panic`). Limit: the overlay is deliberately never focusable, so Tab-navigation of the bar is not possible; the typed box is the keyboard route. `test_keyboard_only_controls`, `_test_setting_commands` |
+| Startup time | partial | the heavy work (Kokoro server, model listing/warm-up probe, acknowledgement clips, wake-word session) already ran in the background and still does; nothing heavy sits on the critical path, so I made no lazy-loading change. Measured now: **main scene ready 464 ms after engine start** (median of 5). The original commit could not be measured the same way (its logs were not flushed when the process was stopped and `--quit-after` hung), so there is no "before" number. |
+| Privacy | done | `docs/privacy.md` lists exactly what stays local and what leaves (transcript text, search queries and page requests, the key only to its own API); audio is never kept unless `debug.save_audio` is on (newest 20 files, auto-deleted); the pre-roll ring is memory-only and dropped while muted/speaking |
+| Code health | partial | type hints on all new GDScript and Python; `pyproject.toml` (ruff config) and `.editorconfig`; ruff is not installed here so it was not run (pyflakes reports no errors; only long-line style warnings in the mock scripts); a request id (`[req N]`) tags the routing, tool and timing log lines of every question; the app-level ANSWER lines do not carry it |
 
+## Notes on git and incidents (all disclosed)
+- **Git.** The branch was committed once by someone else with the message "Your message here" and published to `origin` (visible as `origin/overnight/0929-run`) while I was working; I never ran `git push` and did not touch remotes. That commit contains part of the prefetch work; my history continues on top of it. `main` was not touched.
+- **One accidental live NIM call.** While building the UI test I ran `app/tests/ui_tests.gd` once by hand without fake keys. The app loads the project's `.env` by itself (the normal mechanism), so two typed/voice test questions were answered by the real NIM (at most 2 chat requests). I did not read `.env`; the key was never printed. Fix: the UI test and `scripts/test.sh` now run with fake keys in the environment (environment beats `.env`), every base URL points at a closed local port, and the settings path is a temp file. The only live calls allowed remain `scripts/bench_live.py`'s.
+- **A stray helper process.** While adding `--list-mics` I ran a helper binary that had not yet been rebuilt with that flag; it ignored the flag, started as a helper and connected to your running Filo on port 47821 for a few seconds. I killed it at once; your own helper (pid 11263) stayed connected the whole time and was not touched. Lesson applied: new helper flags are only run after a successful compile, always with an explicit `--port`.
+- **Your running Filo** (started with `scripts/run.sh` before the night) was left alone; it runs the old code and the old helper until you restart it (MANUAL_TESTS.md step 0).
+- **Tests I changed** (all justified where they occur): log strings renamed by the routing work; the Wikipedia query check now uses the game named in the question; "mode button hidden until first answer" -> visible; a fake key fixture shortened; the status pill is now the drag grip; the control bar lists five buttons; UI tests compare a voice question case-insensitively (the term corrector re-cases boss names). No test was deleted, skipped or had a threshold lowered.

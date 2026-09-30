@@ -155,6 +155,12 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `research.prefetch`, `research.stream`, `research.max_tokens`, `research.force_first_tool` | true, true, 160, `required` | speed and behaviour of the tool loop (see Research agent) |
 | `nim.keepalive`, `nim.max_requests_per_minute` | true, 35 | persistent NIM connection; client-side pacing under the free tier limit |
 | `tts.stream_first_sentence` | true | speak the first sentence of a streamed answer while the rest is still being written |
+| `tts.normalize_speech`, `tts.pronunciations`, `tts.acknowledgements` | true, `{}`, 4 phrases | spoken-style text (abbreviations, numbers, markdown), per-word pronunciation overrides (`{"Cthulhu": "Kuh-thoo-loo"}`), the "let me check that" clips |
+| `behavior.acknowledge`, `behavior.ack_after_seconds`, `behavior.caption_seconds` | true, 1.2, 8 | spoken acknowledgement for slow tool-loop answers; how long a caption stays |
+| `overlay.idle_fps`, `overlay.offset` | 10, `[0, 0]` | frame rate while asleep (the cube is not rendered); drag offset from the corner (set by dragging) |
+| `hotkey_panic.key`, `hotkey_panic.modifiers` | `h`, `["control", "option"]` | hides Filo instantly (and mutes the mic); key `""` disables |
+| `research.wikis` | Terraria, Minecraft, Stardew, Dark Souls 1-3, Crimson Desert | one line per game: `"hollow knight": "https://hollowknight.wiki.gg"`; games not listed are discovered by web search at question time |
+| `research.preferred_domains` | wiki.gg, fandom.com, minecraft.wiki, wikipedia.org | search results from these hosts are ranked first |
 | `session.idle_reset_seconds` | 900 | the conversation memory (game + last turns) is cleared after this much idle time or when the game changes |
 | `speech.preroll_ms`, `speech.hangover_ms`, `speech.ptt_tail_ms` | 450, 900, 300 | audio kept from before the key press / wake phrase, silence that ends a question, how long push-to-talk keeps recording after the key is released |
 | `speech.keep_mic_warm` | `auto` | keep the microphone engine running so the pre-roll exists (only while the wake word is on, never while Filo talks or the mic is muted); `off` = cold start on every press |
