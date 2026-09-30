@@ -27,7 +27,7 @@ scripts/build_native.sh                   # compiles the full-screen overlay ext
 scripts/run.sh                            # launch the demo (builds both if missing)
 ```
 
-`scripts/test.sh` runs the unit tests, two offline end-to-end passes (hotkey and wake word,
+`scripts/test.sh` runs the unit tests (386 checks, no network), two offline end-to-end passes (hotkey and wake word,
 with a mock Claude API and a scripted helper) and a showcase capture of every animation.
 
 ## Using it
@@ -45,13 +45,18 @@ Filo remembers the last few turns, so "what about its second phase?" works as a 
 If you say nothing for 30 s after "anything else?", it stops listening for follow-ups but stays
 on screen; "hey filo" wakes it again.
 
-The bubble has two small buttons in its bottom-left corner (they're clickable even though the
-overlay itself is click-through everywhere else):
+A small **control bar** sits beside the cube from the moment Filo launches (even while it is
+asleep). Its buttons are clickable although the rest of the overlay is click-through, so the game
+underneath stays usable:
 
-- **speaker icon** — mutes/unmutes Filo's voice instantly, any time. Answers still appear as text.
-- **mic/keyboard icon** — appears after the first answer; switches how the *next* "anything else?"
-  is followed up: voice (mic opens, bubble shows "Listening") or text (an empty box opens, type
-  your follow-up). Click it mid-listening or mid-typing to switch immediately.
+- **microphone** — mutes/unmutes the microphone: the wake word goes deaf, push-to-talk does nothing
+  (a tap still opens the text box) and macOS' orange mic dot goes away. Backup hotkey `⌃⌥ M`
+  (`hotkey_mute` in `config.json`; set its `key` to `""` to disable).
+- **speaker** — mutes/unmutes Filo's voice instantly, any time. Answers still appear as text.
+- **sound-waves / keyboard** — how the *next* "anything else?" is followed up: voice (mic opens) or
+  text (an empty box opens). Click it mid-listening or mid-typing to switch immediately.
+- **speech bubble with a cursor** — opens the typed-question box (waking Filo if needed). The box
+  takes keyboard focus while it is open and hands it back to the game when it closes.
 
 **First launch:** macOS asks for **Speech Recognition** and **Microphone** for "Filo Helper"
 (the wake word listens all the time, on-device, and macOS shows its orange microphone dot
@@ -61,6 +66,46 @@ while it does). Allow both. If you'd rather not have an always-on microphone, se
 The hotkey is global (works while a game is focused) and never needs the Accessibility
 permission. Change it under `hotkey` in `config.json` (e.g. `{"key": "f8", "modifiers": []}`).
 The overlay is click-through and never takes focus, except while the typed box is open.
+
+## Research agent (NVIDIA NIM tool calling)
+
+With an `NVIDIA_API_KEY`, questions the notes don't answer confidently go to a small research
+agent: the model can call `wiki_search` / `wiki_page` (the game's Fandom wiki, else Wikipedia),
+`web_search` (DuckDuckGo behind a swappable provider) and `fetch_page`, then answers in 1–3 spoken
+sentences. At most 4 model round trips and 6 tool calls, then a forced final answer. Tool output is
+untrusted data (wrapped, sanitized, size-capped; private/loopback addresses are blocked), and
+reasoning text never reaches the bubble or the voice. If every model in the chain fails, Filo falls
+back to Claude (when a key exists) and then to the plain Wikipedia/notes path.
+
+**Model chain** — `research.models` in `config.json`, tried in order; a model that returns
+404/410/429/5xx or times out is skipped for `breaker_seconds` (so a dead model costs one timeout).
+Default: `deepseek-ai/deepseek-v4.1-flash` → `nvidia/nemotron-3-super-120b-a12b` → Claude.
+
+```json
+"research": { "models": [ "nvidia/nemotron-3-super-120b-a12b", "meta/llama-3.3-70b-instruct" ] }
+```
+
+Entries are a model id or `{"id": …, "extra_body_no_think": {…}}` (the request fields that switch
+thinking off for that model). At startup Filo calls `GET /v1/models` once and warns about ids that
+aren't listed. Per game wikis: `wiki` in a profile's `profile.json`, or `research.wikis` for
+games without a profile. The log prints which model answered and per-request latency.
+
+> **Model notes (checked live, 2026-09-29):** `deepseek-ai/deepseek-v4-flash` (and `-0731`) now
+> return **410 end of life**. `deepseek-v4.1-flash` is listed but did not respond within 100 s on the
+> free tier, so in practice `nemotron-3-super-120b-a12b` answers (tool call in ~1 s; a full
+> researched answer typically 4–10 s, occasionally 20 s+ on the shared free tier; ~40 requests/min).
+> Whether DeepSeek accepts `chat_template_kwargs.thinking=false` could not be verified; a 400/422
+> makes Filo retry once without it.
+
+**Tests** — `scripts/test.sh` covers the agent offline (mock NIM, scripted tool calls, injected
+prompts, SSRF, caps, fallback chain, end-to-end). Live, needs `NVIDIA_API_KEY`, otherwise prints
+SKIPPED:
+
+```sh
+scripts/research_live.sh                                       # models listed + tool call returned
+scripts/research_live.sh --bench                               # latency table, 6 sample questions
+scripts/research_live.sh --bench --models nvidia/nemotron-3-super-120b-a12b
+```
 
 ## Test it
 
@@ -77,6 +122,7 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `llm.provider` | `auto` | `auto` = Claude if it has a key, else NVIDIA NIM, else notes-only; or force `anthropic` / `nim` |
 | `model`, `effort` | `claude-opus-5`, `low` | Claude model and reasoning effort (skipped for Haiku) |
 | `nim.model`, `nim.reasoning` | `nvidia/nemotron-3-super-120b-a12b`, `false` | NIM model; reasoning off keeps spoken answers ~3 s |
+| `research.*` | see above | NIM tool-calling agent: `models`, `thinking`, `max_rounds`, `max_tool_calls`, `attempt_timeout`, `tool_timeout`, `cache_ttl`, `breaker_seconds`, `claude_fallback`, `search_provider`, `wikis` |
 | `refusal_fallbacks` | true | Claude only: server-side fallback if the safety classifier declines a request |
 | `web_search.enabled` / `max_uses` / `confidence_threshold` | true / 2 / 0.45 | live web fallback when the notes don't cover the question |
 | `web_search.provider` | `auto` | `auto` = Claude's web search with Claude, free **Wikipedia** summaries otherwise (NIM); or `anthropic` / `wikipedia` / `off` |
@@ -85,6 +131,11 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `behavior.reprompt_phrases`, `behavior.farewell_phrases` | lists | what Filo says after an answer / on "bye filo" |
 | `wake_word.enabled`, `wake_word.phrase`, `wake_word.bye_phrase`, `wake_word.silence_ms` | true, `hey filo`, `bye filo`, 1500 | always-on wake word, the goodbye phrase, the pause that ends a question |
 | `hotkey.key`, `hotkey.modifiers` | `space`, `["option"]` | push-to-talk key |
+| `speech.preroll_ms`, `speech.hangover_ms`, `speech.ptt_tail_ms` | 450, 900, 300 | audio kept from before the key press / wake phrase, silence that ends a question, how long push-to-talk keeps recording after the key is released |
+| `speech.keep_mic_warm` | `auto` | keep the microphone engine running so the pre-roll exists (only while the wake word is on, never while Filo talks or the mic is muted); `off` = cold start on every press |
+| `speech.hotwords`, `speech.term_correction` | `{}`, true | extra recogniser hints per game (`{"terraria": ["Skeletron"]}`), on top of `profiles/vocabulary.json`; repair mis-heard game terms in the transcript |
+| `debug.save_audio`, `debug.audio_dir`, `debug.audio_keep` | false, `logs/audio`, 20 | save every captured utterance as a 16 kHz WAV (newest 20 kept) and log the VAD start/end times, to listen to what the microphone really delivered |
+| `hotkey_mute.key`, `hotkey_mute.modifiers` | `m`, `["control", "option"]` | microphone mute hotkey (backup for the mute button); empty key = off |
 | `default_profile`, `profiles_dir` | `sekiro`, `profiles` | which game's notes to load; a running game switches profiles by app name |
 | `helper.path`, `helper.port`, `helper.allow_server_speech`, `helper.locale` | … | native helper settings |
 | `tts.provider` | `auto` | `auto` = Kokoro when installed, else the system voice; or `kokoro` / `system` |
@@ -109,6 +160,15 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 Run-time flags after `--`: `--showcase`, `--ask "question"`, `--mute`, `--no-helper`,
 `--no-greet`, `--capture-dir DIR`, `--quit-after N`, `--profile ID`, `--verbose`,
 `--list-voices`, `--test-hotkey`.
+
+## Speech recognition and its tests
+
+The helper keeps the last ~450 ms of microphone audio in memory (never on disk unless `debug.save_audio` is on) and replays it into every new recognition request, so the first syllables are never lost; push-to-talk keeps recording 300 ms after the key is released; a question ends after ~0.9 s of *measured* silence (longer when the sentence stops on a word like "the"); the recogniser gets the current game's boss/item names as hints (`profiles/vocabulary.json`, add a game with one line) and mis-heard names are repaired afterwards (`TermCorrector`).
+
+- `scripts/test_audio.sh` - compiles the helper and runs the segmenter/pre-roll/endpointing self-tests (no microphone needed).
+- `.venv/bin/python -m pytest` - the speech-fixture tests (`tests/test_speech_pipeline.py`): questions about Terraria, Sekiro, Dark Souls and Crimson Desert are synthesized with the Kokoro voice (`scripts/gen_speech_fixtures.py`, needs `tts/`), turned into ten scenarios (late key press, early release, pauses, noise at 10-20 dB) and pushed through the same segmenter code the helper runs. One test also runs an offline reference recogniser (faster-whisper, dev-only: `python3 -m venv stt/venv && stt/venv/bin/pip install faster-whisper numpy jiwer`).
+- `stt/venv/bin/python scripts/eval_stt.py --models base.en --hotwords` - word error rate before/after for any scenario; `godot --headless --path app -s tests/term_correction_eval.gd` - the corrector on those transcripts.
+- Hearing what the microphone delivered: set `"debug": {"save_audio": true}`, ask something, open `logs/audio/`.
 
 ## Layout
 

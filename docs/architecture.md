@@ -25,22 +25,30 @@ repo/
 | Claude client | `app/brain/claude_client.gd` | raw HTTP to `api.anthropic.com/v1/messages` (web search, refusal fallbacks) |
 | NIM client | `app/brain/nim_client.gd` | OpenAI-compatible chat completions on `integrate.api.nvidia.com/v1` |
 | speaker | `app/brain/speaker.gd` | two voices: local Kokoro neural TTS (`tts/kokoro_server.py`, one request for the whole utterance so nothing can gap or stall mid-speech, mouth follows the audio envelope, text reveal follows time) or Godot `DisplayServer` TTS (AVSpeechSynthesizer, word boundaries drive mouth + reveal); `auto` prefers Kokoro when installed. A watchdog in `main.gd` forces completion if a provider ever fails to report back, so the conversation loop can't get stuck |
+| research agent | `app/brain/research_agent.gd` | NIM tool-calling loop (≤4 rounds / ≤6 tools, forced final answer), model chain with circuit breaker, 429 backoff, TTL cache, untrusted-result envelope |
+| web tools | `app/brain/web_tools.gd` | `web_search` (swappable provider, DuckDuckGo) and `fetch_page` with SSRF guard (per-hop IP check, redirect + size caps) |
 | Wikipedia client | `app/brain/wikipedia_client.gd` | free web fallback for non-Claude providers: MediaWiki search + REST page summaries, proper User-Agent |
 | UI | `app/ui/` | bubble (listening / thinking / answer / error / info), the typed-question panel, and the bubble's own sound/mode toggle buttons |
 | controller | `app/main.gd` | the app state machine (below) |
 
 ## Clickable controls on a click-through overlay
 
-The overlay is click-through everywhere by default (`Window.mouse_passthrough`), so the game
-underneath always gets the click — except the bubble's two small buttons (mute, and the
-voice/text follow-up switch) need to be clickable themselves. `Main._update_click_regions()`
-runs every frame: it reads the buttons' current on-screen rect (`Control.get_global_rect()`,
-already in the window's local point space) and writes it to `Window.mouse_passthrough_polygon`
-— macOS then treats that one small region as normal and interactive, and leaves the window
-click-through everywhere else. It's skipped whenever something else already needs the whole
-window interactive (the typed-question panel, or the no-helper fallback), so it can never fight
-those; property writes are skipped when the rect hasn't actually changed, to keep the per-frame
-cost negligible.
+The always-visible **control bar** (`app/ui/control_bar.gd`: mic mute, voice mute, follow-up mode,
+type a question) sits next to the cube from the first frame. It used to live inside the speech
+bubble, which is hidden until Filo speaks, so on first launch there was nothing to click.
+
+The window is click-through (`Window.mouse_passthrough`) so the game gets every click, except over
+the bar. `Main._apply_window_mode()` runs every frame: it takes the global cursor position
+(`DisplayServer.mouse_get_position()`, screen pixels), converts it to window points with the
+*current* display scale (`ClickRegion`, `app/core/click_region.gd`) and switches the whole-window
+flag off only while the cursor is over a control (plus 6 pt of slack). The previous approach wrote
+the control rects to `Window.mouse_passthrough_polygon`, which Godot applies in window *pixels*
+while `Control.get_global_rect()` is in *points* — on a Retina display (scale 2) the clickable
+region was half the size and in the wrong place, so the buttons were drawn but every click fell
+through. Typing (and the no-helper fallback) makes the whole window interactive and focusable;
+closing the box makes it click-through and unfocusable again and asks the helper to give keyboard
+focus back to the game (`focus_save` / `focus_restore`). A change of display scale (window dragged
+to another monitor) is detected each frame and the window is re-sized in points (`Main.apply_scale`).
 
 ## LLM providers
 
@@ -85,11 +93,36 @@ that" bubble. While Filo speaks, the wake listener is paused so it cannot wake i
 | `partial` / `final` | text | live transcript / finished transcript (empty if nothing was heard) |
 | `level` | value 0..1 | mic RMS while listening (drives the pulse) |
 | `apps` | apps[{name,bundle_id}] | running apps, for game detection |
-| `error` | code, message | permission / device / recognition problems, shown in the bubble |
+| `error` | code, message | permission / device / recognition problems, shown in the bubble (`muted`: a hold while the mic is muted) |
+| `mute_state` | muted, source (`command` \| `hotkey`) | the microphone was muted/unmuted: the acknowledgement of `set_mute`, or the helper's own mute hotkey |
 
 App → helper: `ping`, `list_apps`, `wake_pause`, `wake_resume`, `set_wake{enabled}`,
 `listen_open{timeout_ms}` (capture the next utterance without a wake phrase, after "anything
-else?"), `listen_stop`, `quit`, `simulate_hotkey{pressed}` (test hook).
+else?"), `listen_stop`, `set_mute{muted}` (microphone off/on, acknowledged with `mute_state`),
+`focus_save` / `focus_restore` (remember the frontmost app before the typed box takes the keyboard,
+give it back afterwards), `set_vocab{words}` (game terms handed to the recogniser as hints), `quit`, `simulate_hotkey{pressed}` (test hook). New helper launch flags:
+`--mute-key`, `--mute-mods`, `--parent-pid`, `--preroll-ms`, `--hangover-ms`, `--ptt-tail-ms`,
+`--no-keep-warm`, `--debug-audio-dir`, `--debug-audio-keep`.
+
+### Audio capture (helper)
+
+`AudioTapCore` receives every microphone buffer on the audio thread and does almost nothing there: one copy of
+channel 0 into a ring of the last `preroll_ms`, the consumers' cheap `request.append`, and everything else
+(level meter, VAD, debug dump) handed to a serial queue. A consumer that registers with `preRoll: true` first gets
+the ring's contents, then live audio, strictly in order and never twice (sequence numbers under one lock; a test
+races 60 joins against a delivering thread). `AudioSource` owns the engine: it idles *warm* only while the wake
+word keeps the microphone on anyway, and is stopped (ring dropped) while Filo speaks - so it never replays its own
+voice - and while muted.
+
+- Push-to-talk (`SpeechCapture`): pre-roll replayed at the key press; recording continues `ptt_tail_ms` after the release.
+- Wake listener: the pre-roll is replayed when a session restarts (every 55 s, after each question), so words spoken
+  in the restart gap are kept; it is cleared after a finished question or "bye" so a restarted session cannot hear it again.
+- End of question: `Endpointing.questionIsOver` = VAD silence >= `hangover_ms` and a transcript unchanged for 0.7 s;
+  a transcript ending on a dangling word ("... how do I beat the") gets extra time; the old 1.5 s transcript-only rule
+  remains the fallback when the VAD has heard nothing.
+- `UtteranceSegmenter` (pure Swift, `AudioSegmenter.swift`): energy VAD with an adaptive noise floor, onset debounce,
+  hysteresis, a steady-noise guard (a fan switching on is not speech), pre-roll, hangover, push-to-talk boundaries.
+- Recogniser hints: `contextualStrings` = the wake phrase + the current game's vocabulary (`set_vocab`).
 
 ### Inside the helper
 
@@ -110,7 +143,7 @@ microphone indicator while the wake word listens), and it exits by itself when t
 ## The answer step
 
 1. `Retriever.search(question)` → top 4 chunks and a confidence in [0, 1].
-2. Low confidence (below `web_search.confidence_threshold`, or no notes matched) → web fallback:
+2. Low confidence with an NVIDIA key → the research agent (above); if the whole chain fails the steps below run as before. Otherwise low confidence (below `web_search.confidence_threshold`, or no notes matched) → web fallback:
    - Claude provider: the `web_search` server tool is attached (max 2 uses).
    - Otherwise (NVIDIA NIM): `WikipediaClient` searches English Wikipedia (MediaWiki search,
      biased with the game name, plain question as a second try), fetches up to two REST page
@@ -128,6 +161,20 @@ microphone indicator while the wake word listens), and it exits by itself when t
 
 Session context (last area / boss / item from screen reading) is a placeholder dictionary in the
 pipeline; Phase 1 fills it.
+
+## The research agent
+
+`AnswerPipeline.ask()` hands low-confidence questions to `ResearchAgent.answer()` (notes are still
+searched first). Each round sends the conversation plus four tool schemas (`wiki_search`,
+`wiki_page`, `web_search`, `fetch_page`) to the first healthy model in `research.models`; tool calls
+in one reply run in parallel and each gets exactly one `tool` message. After 4 rounds or 6 tool
+calls the last request uses `tool_choice: none`. Wiki tools reuse `WikipediaClient` (the same
+MediaWiki API serves Wikipedia and Fandom). Tool results are wrapped in
+`<tool_result trust="untrusted">…</tool_result>`, sanitized and capped, and the system prompt forbids
+following instructions inside them; tools have no side effects beyond HTTP GETs. `reasoning_content`
+is never used as an answer. Chain order: configured NIM models → Claude → the pre-existing
+Wikipedia/notes path. The dict returned to `main.gd` is unchanged, so nothing on the Godot/helper
+boundary moved.
 
 ## What is deliberately not here yet
 

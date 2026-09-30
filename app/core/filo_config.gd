@@ -14,6 +14,41 @@ const DEFAULTS := {
 	"max_tokens": 700,
 	"refusal_fallbacks": true,
 	"nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b", "max_tokens": 500, "temperature": 0.4, "reasoning": false},
+	"research": {
+		"enabled": true,
+		"models": [
+			{"id": "deepseek-ai/deepseek-v4.1-flash", "extra_body_no_think": {"chat_template_kwargs": {"thinking": false}}},
+			{"id": "nvidia/nemotron-3-super-120b-a12b", "extra_body_no_think": {"chat_template_kwargs": {"enable_thinking": false}}},
+		],
+		"thinking": false,
+		"max_rounds": 4,
+		"max_tool_calls": 6,
+		"max_page_chars": 6000,
+		"max_tokens": 350,
+		"temperature": 0.3,
+		"attempt_timeout": 20.0,
+		"tool_timeout": 10.0,
+		"cache_ttl": 900.0,
+		"breaker_seconds": 300.0,
+		"warmup_probe": true,
+		"claude_fallback": true,
+		"search_provider": "duckduckgo",
+		"max_redirects": 3,
+		"max_fetch_bytes": 1500000,
+		"force_first_tool": "required",
+		# One line per game is enough: "game name": "https://wiki-host" (api.php is assumed). Use the long
+		# form {"base_url", "api_path", "name", "aliases"} for wikis whose API lives elsewhere. Games
+		# that are not listed are discovered at question time: web_search -> a wiki that answers api.php.
+		"wikis": {
+			"terraria": "https://terraria.wiki.gg",
+			"minecraft": "https://minecraft.wiki",
+			"stardew valley": {"aliases": ["stardew valley", "stardew"], "base_url": "https://stardewvalleywiki.com", "api_path": "/mediawiki/api.php", "name": "Stardew Valley wiki"},
+			"dark souls": {"aliases": ["dark souls", "darksouls"], "base_url": "https://darksouls.fandom.com", "api_path": "/api.php", "name": "Dark Souls wiki"},
+			"dark souls 2": {"aliases": ["dark souls 2", "dark souls ii", "darksouls2"], "base_url": "https://darksouls2.fandom.com", "api_path": "/api.php", "name": "Dark Souls 2 wiki"},
+			"dark souls 3": {"aliases": ["dark souls 3", "dark souls iii", "darksouls3"], "base_url": "https://darksouls3.fandom.com", "api_path": "/api.php", "name": "Dark Souls 3 wiki"},
+			"crimson desert": {"aliases": ["crimson desert"], "base_url": "https://crimsondesert.fandom.com", "api_path": "/api.php", "name": "Crimson Desert wiki"},
+		},
+	},
 	"wake_word": {"enabled": true, "phrase": "hey filo", "bye_phrase": "bye filo", "silence_ms": 1500},
 	"web_search": {
 		"enabled": true,
@@ -25,6 +60,7 @@ const DEFAULTS := {
 	"default_profile": "sekiro",
 	"profiles_dir": "profiles",
 	"hotkey": {"key": "space", "modifiers": ["option"]},
+	"hotkey_mute": {"key": "m", "modifiers": ["control", "option"]},   # backup for the mic mute button; key "" disables it
 	"helper": {
 		"enabled": true,
 		"path": "helper/build/Filo Helper.app",
@@ -56,6 +92,14 @@ const DEFAULTS := {
 		"farewell_phrases": ["Bye!", "See you!", "Good luck out there!", "Later!"],
 	},
 	"screen_reading": {"enabled": false},
+	"session": {"idle_reset_seconds": 900},
+	# Speech capture (helper): audio kept from before the key press / wake phrase, the silence that ends a
+	# question, how long push-to-talk keeps recording after the key is released. `hotwords`: extra recogniser
+	# hints per game ({"game": ["term", ...]}), on top of profiles/vocabulary.json. `term_correction` repairs
+	# mis-heard game terms in the transcript. `keep_mic_warm`: auto = only while the wake word is on.
+	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true},
+	# Debug: save every captured utterance (16 kHz WAV, newest 20 kept) so the raw audio can be listened to.
+	"debug": {"save_audio": false, "audio_dir": "logs/audio", "audio_keep": 20},
 	"verbose": false,
 }
 
@@ -225,13 +269,13 @@ func resolve_path(p: String) -> String:
 	return FiloConfig.project_root().path_join(p).simplify_path()
 
 
-func hotkey_label() -> String:
-	var mods: Array = get_value("hotkey.modifiers", [])
+func hotkey_label(path: String = "hotkey") -> String:
+	var mods: Array = get_value(path + ".modifiers", [])
 	var symbols := {"command": "⌘", "cmd": "⌘", "option": "⌥", "alt": "⌥", "control": "⌃", "ctrl": "⌃", "shift": "⇧"}
 	var out := ""
 	for m in mods:
 		out += symbols.get(str(m).to_lower(), str(m))
-	var key := str(get_value("hotkey.key", "space"))
+	var key := str(get_value(path + ".key", "space"))
 	return out + (" " if out != "" else "") + key.capitalize()
 
 

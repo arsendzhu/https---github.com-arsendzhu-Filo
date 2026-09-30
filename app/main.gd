@@ -11,6 +11,9 @@ extends Control
 
 enum AppState { ASLEEP, WAKING, IDLE, LISTENING, THINKING, ANSWERING, TYPING, SLEEPING }
 
+## Every question, however it was entered ("voice" | "typed"), goes through _ask(); tests watch this.
+signal question_asked(text: String, source: String)
+
 const HINT_COLOR := Color("bfb3a6")
 
 var cfg: FiloConfig
@@ -21,6 +24,7 @@ var bridge: HelperBridge
 var mascot: Mascot
 var bubble: Bubble
 var input_panel: InputPanel
+var controls: ControlBar
 var hint: Label
 var pipeline: AnswerPipeline
 var speaker: Speaker
@@ -53,7 +57,13 @@ var _followup := false          # LISTENING opened by Filo after an answer
 var _followup_mode := "voice"   # voice | text — which mode the next reprompt uses
 var _had_first_answer := false  # the mode button only appears once there's something to follow up on
 var _fallback_interactive := false   # true once the window has to stay fully interactive (no helper)
-var _click_rect := Rect2(-1, -1, 0, 0)  # last rect applied to mouse_passthrough_polygon, for change detection
+var mic_muted := false          # microphone capture muted (helper stops listening); separate from the voice (TTS) mute
+var mic_mute_confirmed := false # the helper acknowledged the last set_mute
+var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
+var _mute_deadline := 0.0
+var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _vocab_table: Dictionary = {}
+var _vocab_sent := ""
 var _speech_kind := ""          # answer | reprompt | farewell | info
 var _rng := RandomNumberGenerator.new()
 
@@ -83,9 +93,12 @@ func _ready() -> void:
 	speaker.finished.connect(_on_speaker_finished)
 	speaker.cancelled.connect(_on_speaker_cancelled)
 	speaker.mouth_level.connect(func(v: float) -> void: mascot.animator.set_mouth_level(v))
-	bubble.sound_button.set_muted(not speaker.enabled)
-	bubble.sound_button.pressed.connect(_on_sound_button_pressed)
-	bubble.mode_button.pressed.connect(_on_mode_button_pressed)
+	controls.sound_button.set_muted(not speaker.enabled)
+	controls.sound_button.pressed.connect(_on_sound_button_pressed)
+	controls.mode_button.pressed.connect(_on_mode_button_pressed)
+	controls.mic_button.pressed.connect(_on_mic_button_pressed)
+	controls.type_button.pressed.connect(_on_type_button_pressed)
+	controls.mic_button.set_hotkey_label(cfg.hotkey_label("hotkey_mute") if _mute_hotkey_enabled() else "")
 	_rng.randomize()
 
 	pipeline = AnswerPipeline.new()
@@ -148,6 +161,9 @@ func _build_ui() -> void:
 	input_panel.submitted.connect(_on_typed_submitted)
 	input_panel.closed.connect(_on_input_closed)
 
+	controls = ControlBar.new()
+	add_child(controls)
+
 	hint = Label.new()
 	hint.name = "Hint"
 	hint.add_theme_font_size_override("font_size", 11)
@@ -195,8 +211,13 @@ func _process(_delta: float) -> void:
 	bubble.tail_anchor_x = right - 12.0
 	bubble.bottom_anchor_y = bottom
 	bubble.tail_target_y = center.y
-	bubble.mode_button.visible = _had_first_answer and bridge != null and helper_connected
-	_update_click_regions()
+	_sync_scale()
+	_layout_controls()
+	_apply_window_mode()
+	if _mute_deadline > 0.0 and Time.get_ticks_msec() / 1000.0 > _mute_deadline:
+		_mute_deadline = 0.0
+		if bridge != null and helper_connected and not mic_mute_confirmed:
+			FiloLog.warn("The helper did not confirm the microphone %s request" % ("mute" if mic_muted else "unmute"))
 
 
 # ------------------------------------------------------------------ helper
@@ -219,6 +240,7 @@ func _start_helper() -> void:
 	bridge.level.connect(func(v: float) -> void: mascot.animator.set_level(v))
 	bridge.apps.connect(_on_apps)
 	bridge.helper_error.connect(_on_helper_error)
+	bridge.mute_state.connect(_on_mute_state)
 	var port := int(cfg.get_value("helper.port", 47821))
 	if bridge.start_listening(port) != OK:
 		call_deferred("_notice", "I couldn't open port %d for the hotkey helper. Is another Filo running?" % port)
@@ -230,7 +252,7 @@ func _start_helper() -> void:
 		path, extra,
 		str(cfg.get_value("hotkey.key", "space")), cfg.get_value("hotkey.modifiers", []),
 		bool(cfg.get_value("helper.allow_server_speech", false)), str(cfg.get_value("helper.locale", "en-US")),
-		wake_phrase, int(cfg.get_value("wake_word.silence_ms", 1500)))
+		wake_phrase, int(cfg.get_value("wake_word.silence_ms", 1500)), _helper_extra_flags())
 	if not ok:
 		call_deferred("_notice", "The hotkey helper isn't built yet — run scripts/build_helper.sh. Until then, click me and press Space to type.")
 		_fallback_interactive = true
@@ -239,10 +261,54 @@ func _start_helper() -> void:
 	helper_watchdog.start(8.0)
 
 
+func _helper_extra_flags() -> PackedStringArray:
+	var flags := PackedStringArray(["--parent-pid", str(OS.get_process_id())])
+	flags.append_array(PackedStringArray(["--preroll-ms", str(cfg.get_value("speech.preroll_ms", 450)), "--hangover-ms", str(cfg.get_value("speech.hangover_ms", 900)),
+		"--ptt-tail-ms", str(cfg.get_value("speech.ptt_tail_ms", 300))]))
+	if str(cfg.get_value("speech.keep_mic_warm", "auto")).to_lower() == "off":
+		flags.append("--no-keep-warm")
+	if bool(cfg.get_value("debug.save_audio", false)):
+		flags.append_array(PackedStringArray(["--debug-audio-dir", cfg.resolve_path(str(cfg.get_value("debug.audio_dir", "logs/audio"))), "--debug-audio-keep", str(cfg.get_value("debug.audio_keep", 20))]))
+	if _mute_hotkey_enabled():
+		flags.append_array(PackedStringArray(["--mute-key", str(cfg.get_value("hotkey_mute.key", "m")), "--mute-mods", ",".join(PackedStringArray(cfg.get_value("hotkey_mute.modifiers", [])))]))
+	return flags
+
+
+## Game words for the recogniser (hints) and for TermCorrector; resent whenever the game changes.
+func _current_game_name() -> String:
+	if pipeline != null and pipeline.session.game != "":
+		return pipeline.session.game
+	return profile.name if profile != null else ""
+
+
+func _vocabulary() -> PackedStringArray:
+	if _vocab_table.is_empty():
+		_vocab_table = SpeechVocabulary.load_table(profiles_dir)
+	return SpeechVocabulary.for_game(_vocab_table, _current_game_name(), profile, cfg.get_value("speech.hotwords", null))
+
+
+func _send_vocabulary() -> void:
+	var words := _vocabulary()
+	var key := "|".join(words)
+	if key == _vocab_sent:
+		return
+	_vocab_sent = key
+	if bridge != null and helper_connected:
+		bridge.send({"cmd": "set_vocab", "words": Array(words)})
+		FiloLog.debug("Sent %d vocabulary hints for '%s'" % [words.size(), _current_game_name()])
+
+
+func _mute_hotkey_enabled() -> bool:
+	return str(cfg.get_value("hotkey_mute.key", "")).strip_edges() != ""
+
+
 func _on_helper_connected() -> void:
 	helper_connected = true
 	helper_watchdog.stop()
 	apps_timer.start(5.0)
+	if mic_muted:
+		bridge.send({"cmd": "set_mute", "muted": true})
+	_send_vocabulary()
 
 
 func _on_helper_disconnected() -> void:
@@ -270,7 +336,7 @@ func _on_helper_watchdog() -> void:
 func _on_helper_error(code: String, message: String) -> void:
 	FiloLog.warn("Helper error [%s]: %s" % [code, message])
 	match code:
-		"retry":
+		"retry", "muted":
 			_notice(message)
 		"speech_denied", "mic_denied", "speech_unavailable", "no_input_device", "audio_engine", "recognition":
 			_pending_final = false
@@ -468,6 +534,11 @@ func _handle_final(text: String) -> void:
 			bubble.show_info("I didn't catch that — %s." % ("say “%s” again or hold %s" % [str(cfg.get_value("wake_word.phrase", "hey filo")), cfg.hotkey_label()] if _wake_enabled() else "hold %s and try again" % cfg.hotkey_label()))
 			_set_state(AppState.IDLE)
 		return
+	if bool(cfg.get_value("speech.term_correction", true)):
+		var fixed := TermCorrector.correct(q, _vocabulary())
+		if not fixed.changes.is_empty():
+			FiloLog.info("Term correction: %s  (\"%s\" -> \"%s\")" % [str(fixed.changes), q, fixed.text])
+			q = fixed.text
 	mascot.animator.nod()
 	_ask(q)
 
@@ -494,11 +565,13 @@ func _on_typed_submitted(text: String) -> void:
 	if lower == "/help":
 		bubble.show_info("%s, or tap %s to type. Commands: /glint, /sleep, /quit, /help." % [_activation_sentence(), cfg.hotkey_label()])
 		return
-	_ask(text)
+	_ask(text, "typed")
 
 
 func _on_input_closed() -> void:
-	_update_click_regions()
+	controls.type_button.set_active(false)
+	_end_typing_focus()
+	_apply_window_mode()
 	if app_state == AppState.TYPING:
 		_set_state(AppState.IDLE)
 
@@ -552,7 +625,8 @@ func _enter_listening() -> void:
 	bubble.show_listening(_last_partial)
 
 
-func _ask(question: String) -> void:
+func _ask(question: String, source: String = "voice") -> void:
+	question_asked.emit(question, source)
 	_set_state(AppState.THINKING)
 	bubble.show_thinking(question)
 	_answer_token += 1
@@ -566,14 +640,45 @@ func _ask(question: String) -> void:
 		FiloLog.warn("ANSWER FAILED: " + str(result.get("error", "")))
 		_show_error(str(result.get("error", "Something went wrong.")))
 		return
+	if str(result.get("route", "")) == "command":
+		_handle_command(result)
+		return
 	FiloLog.info("ANSWER (%s%s): %s" % [str(result.get("model", "")), ", web" if result.get("used_web", false) else "", result.text])
 	for s in result.sources:
 		FiloLog.info("SOURCE: %s — %s" % [s.title, s.url])
 	mascot.animator.register_turn()
+	_send_vocabulary()
 	_had_first_answer = true
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))
 	_speak(result.spoken, "answer")
+
+
+## Voice commands recognised by the pipeline (no model, no tools): stop, mute, unmute, repeat.
+func _handle_command(result: Dictionary) -> void:
+	var cmd := str(result.get("command", ""))
+	FiloLog.info("COMMAND: " + cmd)
+	match cmd:
+		"stop":
+			speaker.stop()
+			bubble.show_info("Okay.")
+			_set_state(AppState.IDLE)
+		"mute", "unmute":
+			var on := cmd == "mute"
+			speaker.set_muted(on)
+			controls.sound_button.set_muted(on)
+			bubble.show_info(str(result.text))
+			_set_state(AppState.IDLE)
+			if not on:
+				_speak(str(result.spoken), "info")
+		"repeat":
+			_set_state(AppState.ANSWERING)
+			bubble.show_answer("", str(result.text), [], false)
+			_speak(str(result.spoken), "answer")
+		_:
+			_set_state(AppState.IDLE)
+	if _scripted and cmd != "repeat":
+		_finish_scripted()
 
 
 ## After an answer: a short spoken "anything else?" then open listening.
@@ -606,10 +711,10 @@ func _open_followup_listening() -> void:
 ## conversation history keeps flowing exactly as it does in voice mode.
 func _open_followup_typing() -> void:
 	_followup = true
-	OverlayWindow.set_passthrough(get_window(), false)
-	DisplayServer.window_move_to_foreground()
+	_begin_typing_focus()
 	_set_state(AppState.TYPING)
 	input_panel.open()
+	_focus_input()
 
 
 ## Speaks `text` and arms a safety-net timer sized to the text's length: if
@@ -684,7 +789,7 @@ func _sleep() -> void:
 	_followup = false
 	_followup_mode = "voice"
 	_had_first_answer = false
-	bubble.mode_button.set_mode("voice")
+	controls.mode_button.set_mode("voice")
 	_speech_kind = ""
 	if bridge:
 		bridge.send({"cmd": "listen_stop"})
@@ -712,10 +817,10 @@ func _on_sleep_finished() -> void:
 
 
 func _open_typing() -> void:
-	OverlayWindow.set_passthrough(get_window(), false)
-	DisplayServer.window_move_to_foreground()
+	_begin_typing_focus()
 	_set_state(AppState.TYPING)
 	input_panel.open()
+	_focus_input()
 	if bubble.mode == Bubble.Mode.HIDDEN:
 		bubble.show_info("Type your question, then press Enter.")
 
@@ -781,7 +886,7 @@ func _notice(message: String) -> void:
 func _on_sound_button_pressed() -> void:
 	var now_muted := not speaker.user_muted
 	speaker.set_muted(now_muted)
-	bubble.sound_button.set_muted(now_muted)
+	controls.sound_button.set_muted(now_muted)
 	FiloLog.info("Sound " + ("muted" if now_muted else "unmuted"))
 	if now_muted and speaker.is_speaking():
 		speaker.stop()
@@ -799,7 +904,7 @@ func _on_sound_button_pressed() -> void:
 ## switch takes effect immediately instead of waiting for the next question.
 func _on_mode_button_pressed() -> void:
 	_followup_mode = "text" if _followup_mode == "voice" else "voice"
-	bubble.mode_button.set_mode(_followup_mode)
+	controls.mode_button.set_mode(_followup_mode)
 	FiloLog.info("Follow-up mode: " + _followup_mode)
 	if _followup and app_state == AppState.LISTENING:
 		if bridge:
@@ -814,35 +919,144 @@ func _on_mode_button_pressed() -> void:
 			_open_followup_listening()
 
 
-## The window is click-through everywhere except a small region around the
-## sound/mode buttons (via Window.mouse_passthrough_polygon), so the overlay
-## never steals clicks meant for the game while those two controls stay
-## reachable. Skipped whenever something else already needs the whole window
-## interactive (typing, or the no-helper fallback) so it can't fight them.
-func _update_click_regions() -> void:
-	if _fallback_interactive or input_panel.is_open():
-		return
-	var window := get_window()
-	var rect := Rect2(-1, -1, 0, 0)
-	if bubble.visible:
-		rect = bubble.sound_button.get_global_rect()
-		if bubble.mode_button.visible:
-			rect = rect.merge(bubble.mode_button.get_global_rect())
-		rect = rect.grow(4.0)
-	if rect.is_equal_approx(_click_rect):
-		return
-	_click_rect = rect
-	if rect.size.x <= 0.0:
-		window.mouse_passthrough = true
-		window.mouse_passthrough_polygon = PackedVector2Array()
+## The mic mute button (or the mute hotkey in the helper). The state is shown at once and sent to
+## the helper, which stops listening and confirms with a `mute_state` event.
+func _on_mic_button_pressed() -> void:
+	set_mic_muted(not mic_muted, "button")
+
+
+func set_mic_muted(muted: bool, source: String) -> void:
+	mic_muted = muted
+	mic_mute_confirmed = false
+	controls.mic_button.set_muted(muted)
+	FiloLog.info("Microphone %s (%s)" % ["muted" if muted else "unmuted", source])
+	if muted:
+		_pending_final = false
+		_followup = false
+		final_timer.stop()
+		if app_state == AppState.LISTENING:
+			_set_state(AppState.IDLE)
+	if bridge != null and helper_connected:
+		bridge.send({"cmd": "set_mute", "muted": muted})
+		_mute_deadline = Time.get_ticks_msec() / 1000.0 + 2.0
 	else:
-		window.mouse_passthrough = false
-		window.mouse_passthrough_polygon = rect_to_polygon(rect)
+		FiloLog.warn("No helper connected: the mute is only visual until it connects")
+	if app_state != AppState.ASLEEP:
+		var hotkey := " or press %s" % cfg.hotkey_label("hotkey_mute") if _mute_hotkey_enabled() else ""
+		bubble.show_info("Microphone muted. Click the mic again%s to unmute." % hotkey if muted else "Microphone is back on.")
 
 
-## A rect as a 4-point clockwise polygon, in the same window-local point space
-## Control.get_global_rect() already uses — the shape Window.mouse_passthrough_polygon
-## needs. Pulled out on its own so the geometry can be unit tested directly.
+## The helper's confirmation of set_mute, or its own report when the mute hotkey was pressed.
+func _on_mute_state(muted: bool, source: String) -> void:
+	FiloLog.info("Helper reports microphone %s (%s)" % ["muted" if muted else "unmuted", source])
+	if source == "hotkey":
+		set_mic_muted(muted, "hotkey")   # mirror the state (the command it sends back is idempotent)
+		return
+	mic_mute_confirmed = muted == mic_muted
+	_mute_deadline = 0.0
+
+
+## The type button: opens the question box (waking Filo first when it is asleep) or closes it.
+func _on_type_button_pressed() -> void:
+	match app_state:
+		AppState.ASLEEP, AppState.SLEEPING:
+			_wake(AppState.TYPING)
+		AppState.WAKING:
+			_wake_target = AppState.TYPING
+		AppState.TYPING:
+			input_panel.close()
+		_:
+			_answer_token += 1
+			speaker.stop()
+			if bridge:
+				bridge.send({"cmd": "listen_stop"})
+			_pending_final = false
+			_followup = false
+			_open_typing()
+
+
+## Typing needs the keyboard: remember what had focus (the game), then take it. The helper gives
+## it back in _end_typing_focus.
+func _begin_typing_focus() -> void:
+	if bridge != null and helper_connected and not _focus_saved:
+		bridge.send({"cmd": "focus_save"})
+		_focus_saved = true
+	controls.type_button.set_active(true)
+
+
+## The box is open: make the window interactive + focusable, bring it to the front, focus the field.
+func _focus_input() -> void:
+	_apply_window_mode()
+	DisplayServer.window_move_to_foreground()
+	input_panel.line.grab_focus()
+
+
+func _end_typing_focus() -> void:
+	if _focus_saved and bridge != null:
+		bridge.send({"cmd": "focus_restore"})
+	_focus_saved = false
+
+
+# ----------------------------------------------------- click-through + control layout
+
+## Screen scale of the display the window is on (2.0 on Retina).
+func _current_scale() -> float:
+	var sc := DisplayServer.screen_get_scale(DisplayServer.window_get_current_screen())
+	return sc if sc > 0.0 else 1.0
+
+
+## The window moved to a display with another backing scale (or the resolution changed): keep the
+## same size in points and re-derive everything that depends on the scale.
+func _sync_scale() -> void:
+	var sc := _current_scale()
+	if not is_equal_approx(sc, float(win_info.scale)):
+		apply_scale(sc)
+
+
+func apply_scale(sc: float) -> void:
+	FiloLog.info("Display scale changed %.1f -> %.1f: resizing the overlay" % [float(win_info.scale), sc])
+	win_info = OverlayWindow.apply_scale(get_window(), cfg, sc)
+
+
+## Places the control bar left of the cube, under the bubble, and keeps it inside the window.
+func _layout_controls() -> void:
+	var pts := Vector2(get_window().size) / maxf(float(win_info.scale), 0.01)
+	var right := mascot.position.x + mascot.display_pts * 0.17 - 12.0
+	var want := Vector2(right - controls.size.x, pts.y - controls.size.y - 10.0)
+	want.x = clampf(want.x, 4.0, maxf(4.0, pts.x - controls.size.x - 4.0))
+	want.y = clampf(want.y, 4.0, maxf(4.0, pts.y - controls.size.y - 4.0))
+	if controls.position != want:
+		controls.position = want
+
+
+## Rects (window-local points) that must take clicks right now.
+func interactive_rects() -> Array:
+	return controls.interactive_rects()
+
+
+## The window is click-through everywhere except over the controls, so the game underneath stays
+## usable. Each frame the cursor's screen position decides whether the whole window ignores the
+## mouse (see ClickRegion for why this replaces the pixel/point-mismatched polygon). Typing, and
+## the no-helper fallback, need the whole window (and keyboard focus) instead.
+func _apply_window_mode() -> void:
+	var window := get_window()
+	var typing := input_panel != null and input_panel.is_open()
+	var whole := _fallback_interactive or typing
+	var want_pass := false
+	if not whole:
+		want_pass = ClickRegion.passthrough_at(Vector2(DisplayServer.mouse_get_position()), Vector2(window.position), float(win_info.scale), interactive_rects())
+	window_state = {"passthrough": want_pass, "unfocusable": not whole}   # what we ask the OS for (tests read this)
+	if window.mouse_passthrough_polygon.size() > 0:
+		window.mouse_passthrough_polygon = PackedVector2Array()
+	if window.mouse_passthrough != want_pass:
+		window.mouse_passthrough = want_pass
+	if window.unfocusable != (not whole):
+		window.unfocusable = not whole
+
+
+## A rect as a 4-point clockwise polygon in window-local points. The window no longer uses
+## Window.mouse_passthrough_polygon (its pixel/point mismatch left the buttons unclickable on
+## Retina, see ClickRegion); kept as a small geometry utility.
 static func rect_to_polygon(rect: Rect2) -> PackedVector2Array:
 	return PackedVector2Array([
 		rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y),

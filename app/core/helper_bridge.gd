@@ -6,8 +6,10 @@ extends Node
 ##
 ## helper -> app events: ready, hotkey_down, hotkey_up{duration_ms}, tap,
 ##   wake_word{phrase}, partial{text}, final{text}, level{value},
-##   apps{apps:[{name,bundle_id}]}, error{code,message}, pong
-## app -> helper commands: ping, list_apps, wake_pause, wake_resume, set_wake{enabled}, quit
+##   apps{apps:[{name,bundle_id}]}, error{code,message}, pong, mute_state{muted,source}
+## app -> helper commands: ping, list_apps, wake_pause, wake_resume, set_wake{enabled}, quit,
+##   set_mute{muted} (microphone off; acknowledged with mute_state), focus_save / focus_restore
+##   (give keyboard focus back to the game after the typed-question box)
 
 signal connected
 signal disconnected
@@ -23,6 +25,7 @@ signal helper_error(code: String, message: String)
 signal wake_word(phrase: String)
 signal listen_timeout
 signal bye
+signal mute_state(muted: bool, source: String)
 
 var port := 47821
 var launched := false
@@ -43,7 +46,7 @@ func start_listening(listen_port: int) -> Error:
 ## Launches the helper. An .app bundle is launched through `open` so macOS
 ## treats it as its own app for microphone / speech permissions; anything else
 ## is executed directly (used by the fake helper in tests).
-func launch(path: String, extra_args: PackedStringArray, hotkey_key: String, hotkey_mods: Array, allow_server_speech: bool, locale: String, wake_phrase: String = "", wake_silence_ms: int = 1500) -> bool:
+func launch(path: String, extra_args: PackedStringArray, hotkey_key: String, hotkey_mods: Array, allow_server_speech: bool, locale: String, wake_phrase: String = "", wake_silence_ms: int = 1500, more_args: PackedStringArray = PackedStringArray()) -> bool:
 	# extra_args go first so an interpreter + script (e.g. python3 fake_helper.py) works too
 	var args := PackedStringArray()
 	args.append_array(extra_args)
@@ -52,6 +55,7 @@ func launch(path: String, extra_args: PackedStringArray, hotkey_key: String, hot
 		args.append("--allow-server-speech")
 	if wake_phrase.strip_edges() != "":
 		args.append_array(PackedStringArray(["--wake-word", wake_phrase.strip_edges(), "--wake-silence-ms", str(wake_silence_ms)]))
+	args.append_array(more_args)
 	if path.ends_with(".app"):
 		if not DirAccess.dir_exists_absolute(path):
 			FiloLog.error("Helper app not found: " + path)
@@ -159,6 +163,8 @@ func _handle_line(line: String) -> void:
 			apps.emit(parsed.get("apps", []))
 		"error":
 			helper_error.emit(str(parsed.get("code", "")), str(parsed.get("message", "")))
+		"mute_state":
+			mute_state.emit(bool(parsed.get("muted", false)), str(parsed.get("source", "command")))
 		"pong":
 			pass
 		_:

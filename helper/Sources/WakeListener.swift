@@ -18,6 +18,8 @@ final class WakeListener {
     private let matcher: WakeMatcher
     private let silence: TimeInterval
     private let allowServer: Bool
+    private let settings: CaptureSettings
+    private var analyzer: CaptureAnalyzer?
     private let send: ([String: Any]) -> Void
     private let consumerId = UUID()
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -34,7 +36,6 @@ final class WakeListener {
     private var sessionStarted = Date()
     private var ticker: Timer?
     private var restartWork: DispatchWorkItem?
-    private var lastLevelSent = Date.distantPast
     private var failures = 0
     private var openListening = false
     private var noSpeechTimeout: TimeInterval = WakeListener.noSpeechTimeout
@@ -43,16 +44,19 @@ final class WakeListener {
     // running — and picking up Filo's own voice — while it speaks.
     /// false = no wake phrase; sessions only run while open listening is requested
     var detectWake = true
+    /// Microphone muted by the user: no session may start until it is cleared.
+    var micMuted = false
 
     var phrase: String { matcher.phrase }
     var isCapturing: Bool { capturing }
 
-    init(phrase: String, silenceMs: Int, localeId: String, allowServer: Bool, audio: AudioSource, send: @escaping ([String: Any]) -> Void) {
+    init(phrase: String, silenceMs: Int, localeId: String, allowServer: Bool, audio: AudioSource, settings: CaptureSettings, send: @escaping ([String: Any]) -> Void) {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeId)) ?? SFSpeechRecognizer()
         matcher = WakeMatcher(phrase: phrase)
         silence = Double(max(silenceMs, 400)) / 1000.0
         self.allowServer = allowServer
         self.audio = audio
+        self.settings = settings
         self.send = send
     }
 
@@ -60,7 +64,7 @@ final class WakeListener {
 
     /// Starts wake-phrase listening (no-op when the wake word is disabled).
     func start() {
-        guard detectWake else { return }
+        guard detectWake, !micMuted else { return }
         enabled = true
         guard !sessionActive else { return }
         guard let recognizer = recognizer, recognizer.isAvailable else {
@@ -92,6 +96,10 @@ final class WakeListener {
     /// wake phrase. Sends `partial`/`final`, or `listen_timeout` after `timeout`
     /// seconds of silence, or `bye` if the player says goodbye.
     func listenOpen(timeout: TimeInterval) {
+        guard !micMuted else {
+            send(["event": "listen_timeout", "reason": "muted"])
+            return
+        }
         enabled = true
         guard let recognizer = recognizer, recognizer.isAvailable else {
             send(["event": "listen_timeout", "reason": "speech_unavailable"])
@@ -125,6 +133,7 @@ final class WakeListener {
     }
 
     private func beginOpenCapture(_ timeout: TimeInterval) {
+        analyzer?.markCaptureStart()
         capturing = true
         openListening = true
         captureFrom = lastTokenCount
@@ -146,20 +155,35 @@ final class WakeListener {
             req.requiresOnDeviceRecognition = true
         }
         req.taskHint = .dictation
+        // the wake phrase itself, and the game's vocabulary, as hints for the recogniser
+        req.contextualStrings = Array(([matcher.phrase, "bye filo", "hey filo"] + settings.vocabulary).prefix(100))
         if #available(macOS 13.0, *) {
             req.addsPunctuation = true
         }
+        let an = CaptureAnalyzer(label: "wake", hangoverMs: settings.hangoverMs)
+        var lastLevel = Date.distantPast
         do {
-            try audio.add(consumerId) { [weak self] buffer in
+            // The pre-roll replay means a session restart (every 55 s, after each question) does not drop the
+            // words spoken while the recogniser was being set up. live = request.append only (audio thread);
+            // levels, VAD and the debug dump run on the analysis queue.
+            try audio.add(consumerId, preRoll: true, { buffer in
                 req.append(buffer)
-                self?.maybeLevel(buffer)
-            }
+            }, dsp: { [weak self] samples, rate in
+                an.feed(samples, rate: rate)
+                guard let self = self, self.capturing else { return }
+                let now = Date()
+                if now.timeIntervalSince(lastLevel) > 0.06 {
+                    lastLevel = now
+                    self.send(["event": "level", "value": AudioSource.level(of: samples)])
+                }
+            })
         } catch {
             send(["event": "error", "code": "no_input_device", "message": "No microphone input was found, so the wake word is off."])
             enabled = false
             return
         }
         request = req
+        analyzer = an
         sessionActive = true
         sessionStarted = Date()
         scanned = 0
@@ -178,6 +202,7 @@ final class WakeListener {
         ticker?.invalidate()
         ticker = nil
         audio.remove(consumerId)
+        analyzer = nil
         task?.cancel()
         task = nil
         request = nil
@@ -205,11 +230,13 @@ final class WakeListener {
             if !capturing {
                 if matcher.matchBye(norm, from: scanned) {
                     Log.info("bye heard (wake mode)")
+                    audio.clearPreRoll()
                     scanned = norm.count
                     send(["event": "bye"])
                     return
                 }
                 if let idx = matcher.match(norm, from: scanned) {
+                    analyzer?.markCaptureStart()
                     capturing = true
                     captureFrom = idx
                     captureStarted = Date()
@@ -225,6 +252,7 @@ final class WakeListener {
                 let q = words.count > captureFrom ? words[captureFrom...].joined(separator: " ") : ""
                 if norm.count > captureFrom && matcher.matchBye(Array(norm[captureFrom...]), from: 0) {
                     Log.info("bye heard (capture)")
+                    audio.clearPreRoll()
                     capturing = false
                     openListening = false
                     send(["event": "bye"])
@@ -266,7 +294,13 @@ final class WakeListener {
         guard sessionActive else { return }
         let now = Date()
         if capturing {
-            if !lastQuestion.isEmpty && now.timeIntervalSince(lastChange) >= silence {
+            let idleMs = now.timeIntervalSince(lastChange) * 1000
+            let incomplete = Endpointing.looksIncomplete(lastQuestion)
+            let vadKnown = (analyzer?.silenceSeconds ?? 999) < 900   // the VAD has heard the player; otherwise fall back to the transcript alone
+            let over = vadKnown && Endpointing.questionIsOver(silenceMs: (analyzer?.silenceSeconds ?? 0) * 1000, transcriptIdleMs: idleMs,
+                                                              transcript: lastQuestion, hangoverMs: settings.hangoverMs)
+            if !lastQuestion.isEmpty && (over || idleMs >= (silence + (incomplete ? 1.0 : 0)) * 1000) {
+                Log.info(String(format: "question over: vad silence %.2f s, transcript idle %.2f s%@", analyzer?.silenceSeconds ?? -1, idleMs / 1000, incomplete ? " (ended on a dangling word)" : ""))
                 finish(lastQuestion)
             } else if lastQuestion.isEmpty && now.timeIntervalSince(captureStarted) >= noSpeechTimeout {
                 if openListening {
@@ -294,6 +328,9 @@ final class WakeListener {
         noSpeechTimeout = WakeListener.noSpeechTimeout
         Log.info("wake final: \(text)")
         send(["event": "final", "text": text])
+        let an = analyzer
+        audio.core.dspQueue.async { an?.finish(note: "transcript '\(text)'") }
+        audio.clearPreRoll()      // the restarted session must not hear the question again
         endSession()
         failures = 0
         if detectWake {
@@ -303,11 +340,4 @@ final class WakeListener {
         }
     }
 
-    private func maybeLevel(_ buffer: AVAudioPCMBuffer) {
-        guard capturing else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastLevelSent) > 0.06 else { return }
-        lastLevelSent = now
-        send(["event": "level", "value": AudioSource.level(of: buffer)])
-    }
 }

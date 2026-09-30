@@ -11,21 +11,28 @@ static func setup(window: Window, cfg: FiloConfig) -> Dictionary:
 	var scale := DisplayServer.screen_get_scale(screen)
 	if scale <= 0.0:
 		scale = 1.0
+	window.borderless = true
+	window.transparent = true
+	window.always_on_top = true
+	window.unresizable = true
+	window.content_scale_mode = Window.CONTENT_SCALE_MODE_DISABLED
+	var info := apply_scale(window, cfg, scale)
+	set_passthrough(window, true)
+	return info
+
+
+## (Re)sizes and parks the window for a display scale. Sizes in config are points, the window is in
+## physical pixels. Used at start-up and whenever the window lands on a display with another scale.
+static func apply_scale(window: Window, cfg: FiloConfig, scale: float) -> Dictionary:
+	var screen := DisplayServer.window_get_current_screen()
 	var usable := DisplayServer.screen_get_usable_rect(screen)
 	var w_pts: float = float(cfg.get_value("overlay.width", 620))
 	var h_pts: float = float(cfg.get_value("overlay.height", 420))
 	var margin_pts: float = float(cfg.get_value("overlay.margin", 24))
 	var size_px := Vector2i(roundi(w_pts * scale), roundi(h_pts * scale))
 	var margin_px := roundi(margin_pts * scale)
-
-	window.borderless = true
-	window.transparent = true
-	window.always_on_top = true
-	window.unresizable = true
-	window.content_scale_mode = Window.CONTENT_SCALE_MODE_DISABLED
 	window.content_scale_factor = scale
 	window.size = size_px
-
 	var pos := usable.position + usable.size - size_px - Vector2i(margin_px, margin_px)
 	match str(cfg.get_value("overlay.corner", "bottom_right")):
 		"bottom_left":
@@ -36,7 +43,6 @@ static func setup(window: Window, cfg: FiloConfig) -> Dictionary:
 			pos.x = usable.position.x + margin_px
 			pos.y = usable.position.y + margin_px
 	window.position = pos
-	set_passthrough(window, true)
 	FiloLog.info("Overlay window: %dx%d px at %s (scale %.1f, screen usable %s)" % [size_px.x, size_px.y, str(pos), scale, str(usable)])
 	return {"scale": scale, "size_px": size_px, "size_pts": Vector2(w_pts, h_pts)}
 

@@ -17,6 +17,8 @@ var dir := ""
 var process_names := PackedStringArray()
 var window_titles := PackedStringArray()
 var persona_hint := ""
+var vocabulary := PackedStringArray()   # extra words speech recognisers should expect (boss/item names)
+var wiki: Dictionary = {}   # {base_url, api_path, name} of this game's MediaWiki/Fandom site (research tools)
 var notes: Array = []   # Array[Dictionary] {title, source, tags, body, file}
 var load_error := ""
 
@@ -58,6 +60,11 @@ static func load_from(profiles_dir: String, profile_id: String) -> GameProfile:
 	for s in detect.get("window_titles", []):
 		p.window_titles.append(str(s))
 	p.persona_hint = str(data.get("persona_hint", ""))
+	if typeof(data.get("wiki")) == TYPE_DICTIONARY:
+		p.wiki = data["wiki"]
+	if typeof(data.get("vocabulary")) == TYPE_ARRAY:
+		for w in data["vocabulary"]:
+			p.vocabulary.append(str(w))
 	var kb: Dictionary = data.get("kb", {})
 	p._load_notes(p.dir.path_join(str(kb.get("notes_dir", "notes"))))
 	return p
