@@ -91,6 +91,8 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(url.query)
             action = q.get("action", [""])[0]
             sys.stderr.write("mock_gamewiki: %s %r ua=%r\n" % (action, q.get("srsearch", q.get("page", [""]))[0], ua))
+            if action == "query" and q.get("meta", [""])[0] == "siteinfo":
+                return self.reply(200, {"query": {"general": {"sitename": "Mock Wiki"}}})
             if action == "query" and "cthulhu" in q.get("srsearch", [""])[0].lower():
                 return self.reply(200, {"query": {"search": [{"title": "Eye of Cthulhu", "snippet": "The <span class=\"searchmatch\">Eye of Cthulhu</span> is a hardmode-independent boss"}]}})
             if action == "query":
