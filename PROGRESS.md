@@ -11,7 +11,7 @@ Branch `overnight/0929-run` (see "Notes on git and incidents" for how it got pub
 **Numbers (measured).**
 | | before | after |
 | --- | --- | --- |
-| unit checks (Godot) / UI+IPC checks / pytest / offline e2e scenarios | 304-386 / 0 / 0| 774 / 166 / 18 / 8 (2a-2h) |
+| unit checks (Godot) / UI+IPC checks / pytest / offline e2e scenarios | 304-386 / 0 / 0 / 5 | 774 / 166 / 18 / 8 (2a-2h) |
 | word error rate, reference recogniser (faster-whisper base.en), late key press + early release | 0.535 (old capture path, modelled) | 0.155 (new capture; the recogniser's own ceiling on uncut speech) |
 | speech kept by the capture in the 10 scenarios | old path < 0.93 in the clipping ones | >= 99 % in all |
 | WER with per-game hotwords (uncut speech) / term corrector on recorded transcripts | 0.155 / 0.153 | 0.000 / 0.052 (optimistic: the vocabulary overlaps the fixtures, I saw the transcripts while writing the rules) |
