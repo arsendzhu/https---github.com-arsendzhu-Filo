@@ -28,7 +28,7 @@ def test_limits_are_within_the_allowance():
 
 
 def test_the_key_never_appears_in_output_and_the_limits_are_passed_on():
-    fake = "nvapi-FAKE-KEY-FOR-TEST-ONLY-0123456789"
+    fake = "nvapi-" + "FAKE-" * 8               # built at runtime: no key-like literal in the repo
     r = run({"NVIDIA_API_KEY": fake}, ["--dry-run"])
     assert r.returncode == 0
     assert fake not in r.stdout and fake not in r.stderr

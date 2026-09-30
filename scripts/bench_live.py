@@ -110,7 +110,7 @@ def main() -> int:
         return 0
     res = subprocess.run(cmd, env=build_env(key), capture_output=True, text=True, timeout=900)
     out = scrub(res.stdout, key)
-    lines = [l for l in out.splitlines() if not l.startswith(("Godot Engine", "ERROR: ", "   at:")) and "ObjectDB" not in l and "resources still in use" not in l]
+    lines = [ln for ln in out.splitlines() if not ln.startswith(("Godot Engine", "ERROR: ", "   at:")) and "ObjectDB" not in ln and "resources still in use" not in ln]
     print("\n".join(lines[-40:]))
     if res.returncode != 0:
         print(scrub(res.stderr, key)[-1500:])

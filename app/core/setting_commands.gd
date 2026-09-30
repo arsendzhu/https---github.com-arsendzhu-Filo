@@ -4,7 +4,7 @@ extends RefCounted
 ## setting, for accessibility): /opacity /size /corner /captions /autohide /spoilers /text /contrast /game /volume
 ## /settings. Pure: it validates, updates the UserSettings object and says what happened; Main applies the effect.
 
-const HELP := "Settings: /opacity 20-100 · /size 60-160 (restart) · /corner bottom_right|bottom_left|top_right|top_left · /captions on|off · /autohide seconds|off · /spoilers hint|nudge|full · /text 80-200 · /contrast on|off · /volume 0-100 · /game <profile> · /history · /panic · /settings"
+const HELP := "Keyboard: /mic on|off · /voice on|off · /followup voice|text · /type · /setup.  Settings: /opacity 20-100 · /size 60-160 (restart) · /corner bottom_right|bottom_left|top_right|top_left · /captions on|off · /autohide seconds|off · /spoilers hint|nudge|full · /text 80-200 · /contrast on|off · /volume 0-100 · /game <profile> · /history · /panic · /settings"
 
 ## {handled, ok, message, key, restart}
 static func apply(settings: UserSettings, line: String) -> Dictionary:
@@ -51,8 +51,10 @@ static func apply(settings: UserSettings, line: String) -> Dictionary:
 			return _assign(out, settings, "volume", int(arg), "Volume %d." % clampi(int(arg), 0, 100), "Use /volume 0-100.")
 		"/game":
 			if arg == "":
-				return _fail(out, "Use /game sekiro (a folder name under profiles/).")
-			return _assign(out, settings, "game", arg, "Game set to %s. Restart Filo to switch its notes." % arg, "Use /game sekiro.")
+				return _fail(out, "Use /game sekiro (a folder name under profiles/), or /game auto.")
+			if arg == "auto":
+				return _assign(out, settings, "game", "", "Game detection is automatic again (from the running app).", "Use /game auto.")
+			return _assign(out, settings, "game", arg, "Game set to %s and detection is off (use /game auto to turn it back on). Restart Filo to switch its notes." % arg, "Use /game sekiro.")
 		"/settings":
 			out.message = summary(settings)
 			return out

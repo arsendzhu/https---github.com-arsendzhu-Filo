@@ -9,6 +9,8 @@ final class HelperController {
     private var hotKey: HotKey?
     private var speech: SpeechCapture?
     private var wake: WakeListener?
+    private var micTestId: UUID?
+    private var micTestStop: DispatchWorkItem?
     private var muteHotKey: HotKey?
     private var panicHotKey: HotKey?
     private var micMuted = false
@@ -23,6 +25,9 @@ final class HelperController {
         self.options = options
         self.bridge = Bridge(port: options.port)
         self.audio = AudioSource(preRollMs: options.preRollMs)
+        if !options.micDevice.isEmpty, let dev = MicDevices.deviceID(forUID: options.micDevice) {
+            audio.setInputDevice(dev)
+        }
         settings.pttTailMs = options.pttTailMs
         settings.hangoverMs = options.hangoverMs
         settings.debugAudioDir = options.debugAudioDir
@@ -88,6 +93,39 @@ final class HelperController {
                          "message": "Could not register the hotkey \(hotkeyLabel()). Another app may already use it — change \"hotkey\" in config.json."])
         } else {
             Log.info("hotkey registered: \(hotkeyLabel())")
+        }
+    }
+
+    /// Onboarding: stream the microphone level (no recognition, nothing recorded) for up to 30 s so the player can
+    /// see the meter move while they talk.
+    private func micTest(on: Bool) {
+        micTestStop?.cancel()
+        micTestStop = nil
+        if let id = micTestId {
+            audio.remove(id)
+            micTestId = nil
+        }
+        guard on else { return }
+        guard !micMuted else {
+            bridge.send(["event": "error", "code": "muted", "message": "The microphone is muted, so I can't test it."])
+            return
+        }
+        let id = UUID()
+        var last = Date.distantPast
+        do {
+            try audio.add(id, preRoll: false, { _ in }, dsp: { [weak self] samples, _ in
+                let now = Date()
+                if now.timeIntervalSince(last) > 0.06 {
+                    last = now
+                    self?.bridge.send(["event": "level", "value": AudioSource.level(of: samples)])
+                }
+            })
+            micTestId = id
+            let stop = DispatchWorkItem { [weak self] in self?.micTest(on: false) }
+            micTestStop = stop
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: stop)
+        } catch {
+            bridge.send(["event": "error", "code": "no_input_device", "message": "No microphone input was found (\(error))."])
         }
     }
 
@@ -264,6 +302,22 @@ final class HelperController {
             if let on = dict["enabled"] as? Bool {
                 if on { wake?.start() } else { wake?.stop() }
             }
+        case "list_mics":
+            let devices = MicDevices.list().map { ["uid": $0.uid, "name": $0.name, "default": $0.isDefault] as [String: Any] }
+            bridge.send(["event": "mics", "devices": devices])
+        case "set_mic":
+            let uid = dict["uid"] as? String ?? ""
+            if uid.isEmpty {
+                audio.setInputDevice(nil)
+                Log.info("input device: system default")
+            } else if let id = MicDevices.deviceID(forUID: uid) {
+                audio.setInputDevice(id)
+                Log.info("input device: \(uid)")
+            } else {
+                bridge.send(["event": "error", "code": "no_input_device", "message": "That microphone isn't connected any more."])
+            }
+        case "mic_test":
+            micTest(on: (dict["on"] as? Bool) ?? false)
         case "set_mute":
             if let m = dict["muted"] as? Bool { setMuted(m, source: "command") }
         case "focus_save":

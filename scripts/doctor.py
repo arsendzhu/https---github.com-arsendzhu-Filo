@@ -82,7 +82,7 @@ def main() -> int:
         report("PASS", "Godot", (v.stdout.strip() or "found") + "  (" + godot + ")")
         if not args.quick:
             imp = run([godot, "--headless", "--path", os.path.join(ROOT, "app"), "--import"], 120)
-            bad = [l for l in (imp.stdout + imp.stderr).splitlines() if "SCRIPT ERROR" in l or "Parse Error" in l]
+            bad = [ln for ln in (imp.stdout + imp.stderr).splitlines() if "SCRIPT ERROR" in ln or "Parse Error" in ln]
             report("FAIL" if bad else "PASS", "Project loads", (bad[0].strip() if bad else "no script errors"), "run scripts/test.sh for details")
         pr = run([godot, "--headless", "--path", os.path.join(ROOT, "app"), "-s", "tests/doctor_probe.gd"], 60)
         m = re.search(r"DOCTOR_PROBE (\{.*\})", pr.stdout)

@@ -52,6 +52,8 @@ func _run() -> void:
 	_test_settings_commands_apply_live()
 	_test_drag_and_auto_hide()
 	await _test_history_captions_panic()
+	await _test_onboarding()
+	test_keyboard_only_controls()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -413,3 +415,64 @@ func _test_history_captions_panic() -> void:
 	main.bridge._handle_line('{"event":"panic"}')
 	check(not main._panic and is_equal_approx(main.modulate.a, float(main.settings.get_value("overlay_opacity"))) and not main.mic_muted, "pressing it again brings Filo back with the microphone as it was")
 	check(main.interactive_rects().size() >= 1, "and the controls are clickable again")
+
+
+func _test_onboarding() -> void:
+	main.settings.set_value("onboarded", false)
+	main.settings.set_value("mic_device", "")
+	var ob: OnboardingPanel = main.onboarding
+	check(not ob.is_open(), "onboarding is closed by default in this run")
+	main._on_typed_submitted("/setup")
+	check(ob.is_open(), "/setup opens the setup panel")
+	check(await _wait_for(func() -> bool: return ob.devices.size() == 2), "the helper answered list_mics: the panel shows its microphones")
+	check(ob.mic_name.text.contains("MacBook Pro Microphone") and ob.mic_name.text.contains("default"), "the default microphone is selected: " + ob.mic_name.text)
+	await process_frame
+	await process_frame
+	check(main.interactive_rects().size() >= 2 and ClickRegion.covers(main.interactive_rects(), ob.panel.get_global_rect()), "the panel is inside the clickable region")
+	check(await _wait_for(func() -> bool: return _count("mic_test", "on", true) > 0), "the level meter was started in the helper (mic_test on)")
+	check(await _wait_for(func() -> bool: return ob.meter.value > 0.0 or ob._level > 0.0), "the helper's level events move the meter")
+	# pick the other microphone
+	var next_btn: Button = ob.panel.find_child("MicNext", true, false)
+	next_btn.pressed.emit()
+	check(ob.mic_name.text.contains("USB Headset") and main.settings.get_value("mic_device") == "USB-1", "choosing another microphone shows it and saves it")
+	check(await _wait_for(func() -> bool: return _count("set_mic", "uid", "USB-1") > 0), "set_mic{uid} reached the helper process")
+	# hotkey check: the key press is captured by the panel, not treated as a question
+	var state_before: int = main.app_state
+	main._on_hotkey_down()
+	check(ob.hotkey_seen and main.app_state == state_before and ob.hotkey_status.text.contains("Got it"), "pressing the hotkey ticks the hotkey step and does not start listening")
+	# voice test
+	main.speaker.last_text = ""
+	ob.panel.find_child("VoiceTest", true, false).pressed.emit()
+	check(main.speaker.last_text.contains("Filo"), "the voice test speaks: '%s'" % main.speaker.last_text)
+	main.speaker.stop()
+	# game picker
+	check(ob.games.size() >= 1, "the game list has the installed profiles (%d)" % ob.games.size())
+	var before: String = main.profile.id
+	ob.panel.find_child("GameNext", true, false).pressed.emit()
+	check(main.settings.get_value("game") == ob.games[ob.game_index].id and main.profile.id == ob.games[ob.game_index].id, "choosing a game loads its profile and saves the choice (%s -> %s)" % [before, main.profile.id])
+	# done
+	var off_before := _count("mic_test", "on", false)
+	ob.panel.find_child("Done", true, false).pressed.emit()
+	check(not ob.is_open() and main.settings.get_value("onboarded") == true, "Done closes the panel and remembers that setup was done")
+	check(await _wait_for(func() -> bool: return _count("mic_test", "on", false) > off_before), "the meter was switched off again")
+	main._on_onboarding_game(before)       # leave the profile as it was for the tests after this one
+
+
+func test_keyboard_only_controls() -> void:
+	# every button of the control bar has a typed equivalent, so nothing needs the mouse
+	main._on_typed_submitted("/mic off")
+	check(main.mic_muted and main.controls.mic_button.muted, "/mic off mutes the microphone like the button")
+	main._on_typed_submitted("/mic on")
+	check(not main.mic_muted, "/mic on unmutes it")
+	main._on_typed_submitted("/voice off")
+	check(main.speaker.user_muted and main.controls.sound_button.muted and main.settings.get_value("voice_muted") == true, "/voice off mutes Filo's voice like the speaker button")
+	main._on_typed_submitted("/voice on")
+	check(not main.speaker.user_muted, "/voice on brings it back")
+	main._on_typed_submitted("/followup text")
+	check(main._followup_mode == "text" and main.controls.mode_button.mode == "text", "/followup text switches follow-ups to typing like the mode button")
+	main._on_typed_submitted("/followup voice")
+	check(main._followup_mode == "voice", "/followup voice switches back")
+	main.app_state = main.AppState.IDLE
+	main._on_typed_submitted("/type")
+	check(main.input_panel.is_open(), "/type opens the question box like the type button")
+	main.input_panel.close()

@@ -32,3 +32,23 @@ Needs the rebuilt helper (step 0). Put `"debug": {"save_audio": true}` in `confi
 6. **Game words**: ask about "Kliff in Crimson Desert", "Oongka", "the Lordvessel in Dark Souls", "Skeletron in Terraria". The terminal shows `Term correction: [...]` when a mis-heard name was repaired and `vocabulary hints: N words` in the helper log.
 7. **Privacy check**: with `save_audio` false (the default) `logs/audio/` stays empty. While Filo is speaking, the orange microphone dot should go off (the wake listener is stopped so it never hears itself) and while the mic is muted it stays off.
 8. Turn `save_audio` off again when done.
+
+## 4. Speed (workstream 4) - needs your NVIDIA key in the environment
+1. `NVIDIA_API_KEY=nvapi-... python3 scripts/bench_live.py --smoke` - the configured models are listed and `tool_choice=required` is accepted (or rejected, which Filo handles).
+2. Baseline: `NVIDIA_API_KEY=... python3 scripts/bench_live.py --label baseline --no-prefetch --no-stream --out logs/bench_baseline.json`; then `... --label final --out logs/bench_final.json` (each uses <= 20 requests; a slower or less accurate final run is reported as WORSE - then set `research.prefetch` / `research.stream` to false).
+3. Ask "how do I beat the Eye of Cthulhu in Terraria" by voice. In the terminal: `Prefetch: wiki_search, wiki_page`, `Research done: ... rounds=1`, `NIM ...: first token ... ms ... reused connection`, `Streaming: speaking the first sentence ...`. Filo starts talking before the whole answer is written and the second sentence follows without a gap.
+4. With the free tier's occasional 20 s stalls: the wait text changes to "Looking that up" and Filo says "Let me check that." after ~1.2 s.
+
+## 5. Product layer (workstream 5)
+1. **Setup** (first launch or `/setup`): the panel shows your real microphones; talking moves the bar; pressing `⌥ Space` ticks step 2; "Play a test sentence" speaks; the arrows change game; Done.
+2. **Status pill**: Listening while you talk, "Heard you" for a second after you stop, Thinking, Speaking; "Mic muted" (red) after muting.
+3. **Barge-in**: while Filo is speaking a long answer press `⌥ Space`: it stops instantly and listens. (Optional: `"speech": {"voice_barge_in": true}` then say "hey filo" while it talks; if it interrupts *itself*, turn it off again.)
+4. **Spoilers**: ask "how do I beat Lady Butterfly" - a short hint; say "tell me more" - a clearer nudge; again - the full answer; "spoil it" jumps to full. `/spoilers full` changes the starting level.
+5. **History / captions**: click the list button - the last 10 questions; `/captions on` - answers stay a few seconds and fade.
+6. **Drag**: drag the "Ready" pill; drop near a screen corner - it snaps; drop in the middle - it stays; restart Filo - it is where you left it. `/opacity 60` dims it; `/corner top_left` moves it.
+7. **Panic**: press `⌃⌥H`: Filo vanishes and stops listening (the orange mic dot goes away); press again: it returns with the mic as it was.
+8. **Auto-hide**: `/autohide 10`, leave it alone for 10 s: the controls fade; hover the spot: they return. `/autohide off`.
+9. **Accessibility**: `/text 150` and `/contrast on` change the bubble at once; try controlling everything with `/mic off`, `/voice off`, `/followup text`, `/type`, `/history`.
+10. **Failures**: unplug/disable the microphone, or turn Wi-Fi off and ask a question needing the web: each gets one short spoken sentence and a message with what to do.
+11. **Doctor**: `python3 scripts/doctor.py` - everything PASS or a clear hint.
+12. **Idle cost**: leave Filo asleep for a minute and check Activity Monitor: about 2 % CPU (measured 1.9 %; `scripts/measure_idle.sh`).

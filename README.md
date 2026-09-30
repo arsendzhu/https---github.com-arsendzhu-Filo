@@ -67,6 +67,23 @@ The hotkey is global (works while a game is focused) and never needs the Accessi
 permission. Change it under `hotkey` in `config.json` (e.g. `{"key": "f8", "modifiers": []}`).
 The overlay is click-through and never takes focus, except while the typed box is open.
 
+## Comfort, control and privacy
+
+- **First run** opens a short setup (microphone picker with a live level meter, hotkey check, voice test, game picker); `/setup` runs it again.
+- **Status** - a dot and one word beside the control bar (Ready, Listening, Heard you, Thinking, Speaking, Typing, Mic muted, Problem) always says whether Filo heard you. A slow answer gets a spoken "let me check that".
+- **Interrupting** - press the talk hotkey (or say the wake phrase with `speech.voice_barge_in`) while Filo talks: it stops at once.
+- **Spoilers** - answers start as a short *hint*; say **"tell me more"** for a nudge and again for the full answer, or **"spoil it"** to jump ahead (`/spoilers hint|nudge|full` sets the starting level).
+- **Follow-ups** - "what about the second phase?" knows the game and the topic (memory resets when the game changes or after 15 minutes idle).
+- **History and captions** - the list button opens the last 10 questions and answers (text only); `/captions on` keeps each answer on screen a few seconds and fades it.
+- **Moving and hiding** - drag the status pill to move Filo (it snaps to the screen corners and remembers where you left it); `/opacity 20-100`, `/size 60-160` (restart), `/corner ...`, `/autohide seconds`. The **panic hotkey `⌃⌥H`** (`hotkey_panic`) hides Filo instantly and mutes the microphone; press it again to bring everything back.
+- **Accessibility** - `/text 80-200` (text size), `/contrast on` (high-contrast bubble), and every button has a typed equivalent (`/mic on|off`, `/voice on|off`, `/followup voice|text`, `/type`, `/history`, `/setup`), so nothing needs the mouse. `/help` lists them all; `/settings` shows the current values.
+- **Failures are never silent**: no microphone, permission denied, service down, rate limited, no internet, wiki not found - each is spoken in one short sentence and shown with what to do.
+- **Doctor** - `python3 scripts/doctor.py` (add `--offline` to skip network checks) prints a PASS/FAIL list for Godot, the helper, microphone, API key (never printed), model list, wikis, voice and settings.
+- **Privacy** - see [docs/privacy.md](docs/privacy.md) for exactly what stays on your machine and what leaves it.
+- **Over games** - Filo floats over borderless-windowed and full-screen-Space games. *Exclusive full-screen* games take over the display and no overlay of any kind can appear on top of them: set the game to borderless windowed.
+
+Your settings live in `settings.json` (validated on load; a corrupt file is set aside as `settings.json.corrupt` and the defaults are used).
+
 ## Research agent (NVIDIA NIM tool calling)
 
 With an `NVIDIA_API_KEY`, questions the notes don't answer confidently go to a small research

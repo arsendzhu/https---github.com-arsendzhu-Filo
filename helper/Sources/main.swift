@@ -17,6 +17,7 @@ struct Options {
     var wakePhrase = ""          // empty = wake word off
     var wakeSilenceMs = 1500
     var testMatcher = false
+    var micDevice = ""           // CoreAudio UID of the chosen input ("" = system default)
     var muteKey = ""             // empty = no mute hotkey
     var muteMods: [String] = []
     var parentPid: Int32 = 0     // Filo's own process, never treated as "the game" when giving focus back
@@ -54,6 +55,10 @@ func parseOptions() -> Options {
         case "--wake-word": if let v = next() { o.wakePhrase = v }
         case "--wake-silence-ms": if let v = next(), let ms = Int(v) { o.wakeSilenceMs = ms }
         case "--test-matcher": o.testMatcher = true
+        case "--mic-device": if let v = next() { o.micDevice = v }
+        case "--list-mics":
+            for m in MicDevices.list() { print("\(m.isDefault ? "*" : " ") \(m.uid)\t\(m.name)") }
+            exit(0)
         case "--mute-key": if let v = next() { o.muteKey = v }
         case "--mute-mods":
             if let v = next() {

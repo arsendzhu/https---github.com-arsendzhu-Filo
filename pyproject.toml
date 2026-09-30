@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+extend-exclude = ["tts/venv", "stt/venv", ".venv", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E501", "E701", "E702", "E731", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

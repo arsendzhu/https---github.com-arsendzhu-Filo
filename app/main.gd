@@ -24,6 +24,7 @@ var bridge: HelperBridge
 var mascot: Mascot
 var bubble: Bubble
 var input_panel: InputPanel
+var onboarding: OnboardingPanel
 var history_panel: HistoryPanel
 var controls: ControlBar
 var hint: Label
@@ -144,6 +145,7 @@ func _ready() -> void:
 		OverlayWindow.set_passthrough(get_window(), false)
 	_set_fps(false)
 
+	FiloLog.info("Startup: main scene ready %d ms after the engine started" % Time.get_ticks_msec())
 	if args.has("list_voices"):
 		for v in DisplayServer.tts_get_voices():
 			print("voice: %s | %s | %s" % [v.get("name", ""), v.get("language", ""), v.get("id", "")])
@@ -163,7 +165,10 @@ func _ready() -> void:
 		_scripted = true
 		call_deferred("_run_scripted_question", str(args["ask"]))
 	elif bool(cfg.get_value("behavior.greet_on_launch", true)):
-		call_deferred("_greet")
+		if not bool(settings.get_value("onboarded")) and bool(cfg.get_value("helper.enabled", true)):
+			call_deferred("_start_onboarding")      # first run: set up the microphone, hotkey, voice and game
+		else:
+			call_deferred("_greet")
 
 
 func _build_ui() -> void:
@@ -188,6 +193,15 @@ func _build_ui() -> void:
 	add_child(controls)
 	history_panel = HistoryPanel.new()
 	add_child(history_panel)
+	onboarding = OnboardingPanel.new()
+	add_child(onboarding)
+	onboarding.mic_selected.connect(_on_onboarding_mic)
+	onboarding.mic_test_requested.connect(func(on: bool) -> void:
+		if bridge != null and helper_connected:
+			bridge.send({"cmd": "mic_test", "on": on}))
+	onboarding.voice_test_requested.connect(func() -> void: _speak("Hi, I'm Filo. Can you hear me okay?", "info"))
+	onboarding.game_selected.connect(_on_onboarding_game)
+	onboarding.finished.connect(_finish_onboarding)
 	controls.history_button.pressed.connect(_toggle_history)
 	controls.status.drag_started.connect(func() -> void: _begin_drag(DisplayServer.mouse_get_position()))
 	controls.status.drag_ended.connect(_end_drag)
@@ -272,11 +286,15 @@ func _start_helper() -> void:
 	bridge.bye.connect(_on_bye)
 	bridge.partial_transcript.connect(_on_partial)
 	bridge.final_transcript.connect(_on_final)
-	bridge.level.connect(func(v: float) -> void: mascot.animator.set_level(v))
+	bridge.level.connect(func(v: float) -> void:
+		mascot.animator.set_level(v)
+		if onboarding.is_open():
+			onboarding.set_level(v))
 	bridge.apps.connect(_on_apps)
 	bridge.helper_error.connect(_on_helper_error)
 	bridge.mute_state.connect(_on_mute_state)
 	bridge.panic.connect(_on_panic)
+	bridge.mics.connect(func(list: Array) -> void: onboarding.set_devices(list, str(settings.get_value("mic_device"))))
 	var port := int(cfg.get_value("helper.port", 47821))
 	if bridge.start_listening(port) != OK:
 		call_deferred("_notice", "I couldn't open port %d for the hotkey helper. Is another Filo running?" % port)
@@ -421,6 +439,11 @@ func _on_helper_connected() -> void:
 	apps_timer.start(5.0)
 	if mic_muted:
 		bridge.send({"cmd": "set_mute", "muted": true})
+	if str(settings.get_value("mic_device")) != "":
+		bridge.send({"cmd": "set_mic", "uid": str(settings.get_value("mic_device"))})
+	if onboarding.is_open():
+		bridge.send({"cmd": "list_mics"})
+		bridge.send({"cmd": "mic_test", "on": true})
 	_send_vocabulary()
 
 
@@ -472,7 +495,10 @@ func _on_apps_tick() -> void:
 
 
 func _on_apps(list: Array) -> void:
-	# Detect a running game by app name and switch to its profile.
+	# Detect a running game by app name (local only: the list of running apps, no screenshots) and switch to its
+	# profile - unless the user picked a game by hand (settings "game"; /game auto turns detection back on).
+	if str(settings.get_value("game")) != "" and str(settings.get_value("game")) == profile.id:
+		return
 	var names := PackedStringArray()
 	for a in list:
 		if typeof(a) == TYPE_DICTIONARY:
@@ -485,7 +511,6 @@ func _on_apps(list: Array) -> void:
 			if p.matches_app(n):
 				if profile.id != pid:
 					FiloLog.info("Detected running game '%s' -> profile %s" % [n, pid])
-					_save_setting("game", pid)
 					_load_profile(pid)
 					pipeline.set_profile(profile)
 					if app_state != AppState.ASLEEP:
@@ -497,6 +522,9 @@ func _on_apps(list: Array) -> void:
 
 func _on_hotkey_down() -> void:
 	if _panic:
+		return
+	if onboarding.is_open():
+		onboarding.on_hotkey()          # the hotkey check: it works, and it must not start listening now
 		return
 	_last_partial = ""
 	_pending_final = false
@@ -555,6 +583,8 @@ func _on_hotkey_up(_duration_ms: int) -> void:
 
 func _on_tap() -> void:
 	if _panic:
+		return
+	if onboarding.is_open():
 		return
 	# The helper reports hotkey_down first (we may already be LISTENING), then
 	# decides it was a tap; act on the state the press started from. A tap while
@@ -688,6 +718,32 @@ func _on_typed_submitted(text: String) -> void:
 		return
 	if lower == "/quit":
 		quit()
+		return
+	# keyboard equivalents of the control-bar buttons (accessibility: nothing needs the mouse)
+	if lower.begins_with("/mic ") or lower.begins_with("/voice ") or lower.begins_with("/followup "):
+		var which := lower.get_slice(" ", 0)
+		var val := lower.get_slice(" ", 1).strip_edges()
+		match which:
+			"/mic":
+				set_mic_muted(val in ["off", "mute", "muted"], "keyboard")
+			"/voice":
+				var mute_voice: bool = val in ["off", "mute", "muted"]
+				speaker.set_muted(mute_voice)
+				controls.sound_button.set_muted(mute_voice)
+				_save_setting("voice_muted", mute_voice)
+				bubble.show_info("Voice %s." % ("muted" if mute_voice else "on"))
+			"/followup":
+				if val in ["voice", "text"]:
+					_followup_mode = val
+					controls.mode_button.set_mode(val)
+					_save_setting("followup_mode", val)
+					bubble.show_info("Follow-ups will be %s." % ("typed" if val == "text" else "spoken"))
+		return
+	if lower == "/type":
+		_open_typing()
+		return
+	if lower == "/setup":
+		_start_onboarding()
 		return
 	if lower == "/history":
 		_toggle_history()
@@ -1278,6 +1334,9 @@ func _layout_controls() -> void:
 	if history_panel.is_open():
 		history_panel.size = history_panel.panel.size
 		history_panel.position = Vector2(clampf(controls.position.x + controls.size.x - history_panel.panel.size.x, 4.0, maxf(4.0, pts.x - history_panel.panel.size.x - 4.0)), maxf(4.0, controls.position.y - history_panel.panel.size.y - 8.0))
+	if onboarding.is_open():
+		onboarding.size = onboarding.panel.size
+		onboarding.position = Vector2(maxf(4.0, pts.x - onboarding.panel.size.x - 8.0), maxf(4.0, controls.position.y - onboarding.panel.size.y - 10.0))
 	# the activation hint sits to the left of the bar, on the same row (two short lines)
 	hint.size = Vector2(maxf(40.0, controls.position.x - 10.0), controls.size.y)
 	hint.position = Vector2(4.0, controls.position.y)
@@ -1291,6 +1350,8 @@ func interactive_rects() -> Array:
 	var rects: Array = controls.interactive_rects()
 	if history_panel.is_open():
 		rects.append(history_panel.rect_global())
+	if onboarding.is_open():
+		rects.append(onboarding.rect_global())
 	return rects
 
 
@@ -1510,3 +1571,46 @@ func _set_panic(on: bool) -> void:
 		modulate.a = float(settings.get_value("overlay_opacity"))
 		_set_fps(false)
 		_apply_window_mode()
+
+
+# ------------------------------------------------------------------------------------- onboarding
+
+## First-run (or /setup): microphone picker with a live meter, hotkey check, voice test, game picker.
+func _start_onboarding() -> void:
+	if _panic or onboarding.is_open():
+		return
+	var list := []
+	for pid in GameProfile.list_profiles(profiles_dir):
+		if not _profile_cache.has(pid):
+			_profile_cache[pid] = GameProfile.load_from(profiles_dir, pid)
+		list.append({"id": pid, "name": _profile_cache[pid].name})
+	onboarding.set_games(list, profile.id if profile != null else "")
+	onboarding.open(cfg.hotkey_label())
+	if bridge != null and helper_connected:
+		bridge.send({"cmd": "list_mics"})
+	FiloLog.info("Onboarding opened")
+
+
+func _on_onboarding_mic(uid: String) -> void:
+	_save_setting("mic_device", uid)
+	if bridge != null and helper_connected:
+		bridge.send({"cmd": "set_mic", "uid": uid})
+		bridge.send({"cmd": "mic_test", "on": true})       # restart the meter on the new device
+
+
+func _on_onboarding_game(id: String) -> void:
+	_save_setting("game", id)
+	_load_profile(id)
+	pipeline.set_profile(profile)
+	_vocab_sent = ""
+	_send_vocabulary()
+	FiloLog.info("Game chosen in setup: %s" % profile.name)
+
+
+func _finish_onboarding() -> void:
+	_save_setting("onboarded", true)
+	onboarding.close()
+	speaker.stop()
+	FiloLog.info("Onboarding finished")
+	if app_state in [AppState.ASLEEP, AppState.SLEEPING]:
+		bubble.show_info("All set. %s." % _activation_sentence())

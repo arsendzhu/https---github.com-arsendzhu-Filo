@@ -9,7 +9,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCTOR = os.path.join(ROOT, "scripts", "doctor.py")
-FAKE_KEY = "nvapi-FAKE-DOCTOR-KEY-0123456789abcdef"
+FAKE_KEY = "nvapi-" + "FAKE-" * 8          # built at runtime: no key-like literal in the repo
 
 
 def run(args, env_extra=None):

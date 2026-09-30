@@ -7,7 +7,7 @@ extends Node
 ## helper -> app events: ready, hotkey_down, hotkey_up{duration_ms}, tap,
 ##   wake_word{phrase}, partial{text}, final{text}, level{value},
 ##   apps{apps:[{name,bundle_id}]}, error{code,message}, pong, mute_state{muted,source}, panic (the panic hotkey)
-## app -> helper commands: ping, list_apps, wake_pause, wake_resume, set_wake{enabled}, quit,
+## app -> helper commands (also: list_mics -> mics{devices}, set_mic{uid}, mic_test{on} -> level events): ping, list_apps, wake_pause, wake_resume, set_wake{enabled}, quit,
 ##   set_mute{muted} (microphone off; acknowledged with mute_state), focus_save / focus_restore
 ##   (give keyboard focus back to the game after the typed-question box)
 
@@ -27,6 +27,7 @@ signal listen_timeout
 signal bye
 signal mute_state(muted: bool, source: String)
 signal panic
+signal mics(devices: Array)
 
 var port := 47821
 var launched := false
@@ -168,6 +169,8 @@ func _handle_line(line: String) -> void:
 			mute_state.emit(bool(parsed.get("muted", false)), str(parsed.get("source", "command")))
 		"panic":
 			panic.emit()
+		"mics":
+			mics.emit(parsed.get("devices", []))
 		"pong":
 			pass
 		_:
