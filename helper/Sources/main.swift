@@ -26,6 +26,8 @@ struct Options {
     var keepWarm = true          // keep the microphone engine running (only while the wake word is on) so the pre-roll exists
     var debugAudioDir = ""       // non-empty: save every captured utterance here (last N kept)
     var debugAudioKeep = 20
+    var panicKey = ""
+    var panicMods: [String] = []
     var voiceBargeIn = false     // keep listening for the wake phrase while Filo speaks, so "hey filo" can interrupt it
 }
 
@@ -63,6 +65,11 @@ func parseOptions() -> Options {
         case "--ptt-tail-ms": if let v = next(), let d = Double(v) { o.pttTailMs = max(0, min(1500, d)) }
         case "--no-keep-warm": o.keepWarm = false
         case "--voice-barge-in": o.voiceBargeIn = true
+        case "--panic-key": if let v = next() { o.panicKey = v }
+        case "--panic-mods":
+            if let v = next() {
+                o.panicMods = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
         case "--debug-audio-dir": if let v = next() { o.debugAudioDir = v }
         case "--debug-audio-keep": if let v = next(), let n = Int(v) { o.debugAudioKeep = max(1, n) }
         default: break   // ignore LaunchServices args such as -psn_...

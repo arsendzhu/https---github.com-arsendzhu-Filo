@@ -51,6 +51,7 @@ func _run() -> void:
 	await _test_failures_are_spoken_and_shown()
 	_test_settings_commands_apply_live()
 	_test_drag_and_auto_hide()
+	await _test_history_captions_panic()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -105,7 +106,7 @@ func test_ui_controls_visible_on_launch() -> void:
 		check(b.size.x >= 16.0 and b.size.y >= 16.0, "%s is big enough to hit (%s)" % [b.name, str(b.size)])
 		check(window_rect.encloses(b.get_global_rect()), "%s lies inside the overlay window (%s in %s)" % [b.name, str(b.get_global_rect()), str(window_rect)])
 		check(b.tooltip_text != "", "%s has a tooltip" % b.name)
-	check(names == ["MicButton", "SoundButton", "ModeButton", "TypeButton"], "the bar has mic mute, voice mute, follow-up mode and type: " + str(names))
+	check(names == ["MicButton", "SoundButton", "ModeButton", "TypeButton", "HistoryButton"], "the bar has mic mute, voice mute, follow-up mode, type and history: " + str(names))
 	check(controls.mode_button.visible, "the follow-up mode button is shown from launch (it used to appear only after the first answer)")
 	check(controls.panel.mouse_filter != Control.MOUSE_FILTER_STOP, "the bar's backing panel does not swallow clicks aimed at the game")
 	check(not main.controls.mic_button.muted, "the microphone starts unmuted")
@@ -212,7 +213,7 @@ func _test_typing_over_ipc() -> void:
 func _test_control_bar_without_main() -> void:
 	var bar := ControlBar.new()
 	root.add_child(bar)
-	check(bar.is_visible_in_tree() and bar.buttons().size() == 4 and bar.interactive_rects().size() == 1, "a control bar on its own is visible with four buttons and one clickable region")
+	check(bar.is_visible_in_tree() and bar.buttons().size() == 5 and bar.interactive_rects().size() == 1, "a control bar on its own is visible with five buttons and one clickable region")
 	bar.mic_button.set_muted(true)
 	check(bar.mic_button.muted and bar.mic_button.tooltip_text.begins_with("Unmute"), "the mic button shows and explains its muted state")
 	var clicks := [0]
@@ -367,3 +368,48 @@ func _test_drag_and_auto_hide() -> void:
 	main.settings.set_value("auto_hide_seconds", 0)
 	main._update_auto_hide(100.0)
 	check(is_equal_approx(main.controls.modulate.a, main.controls.rest_alpha), "auto-hide off: always visible")
+
+
+func _test_history_captions_panic() -> void:
+	# history: text only, newest 10, its own button, part of the clickable region while open
+	var hp: HistoryPanel = main.history_panel
+	check(not hp.is_open() and main.controls.history_button.mouse_filter == Control.MOUSE_FILTER_STOP, "the history button exists and the panel starts closed")
+	for i in 13:
+		hp.add_entry("question %d" % i, "answer %d" % i, "Terraria")
+	check(hp.entries.size() == 10 and hp.entries[0].q == "question 3" and hp.entries[9].q == "question 12", "the last 10 exchanges are kept, oldest dropped")
+	check(hp.entries[0].keys() == ["q", "a", "game"], "an entry is text only (question, answer, game) - no sources, links or audio: " + str(hp.entries[0].keys()))
+	main.controls.history_button.pressed.emit()
+	await process_frame
+	await process_frame
+	check(hp.is_open() and main.controls.history_button.active and main.interactive_rects().size() == 2, "clicking the button opens the panel and adds it to the clickable region")
+	check(ClickRegion.covers(main.interactive_rects(), hp.panel.get_global_rect()), "the panel lies inside the clickable region")
+	main._on_typed_submitted("/history")
+	check(not hp.is_open(), "/history toggles it from the keyboard")
+	# captions: the answer stays (and fades on its own) instead of being replaced by the follow-up prompt
+	main.settings.set_value("captions", true)
+	main.bubble.show_answer("q", "A caption that should stay on screen.", [], false)
+	check(main._captions_keep_answer(), "with captions on an answer bubble is kept")
+	main.app_state = main.AppState.LISTENING
+	main.linger_timer.stop()
+	main._on_linger_timeout()
+	check(main.bubble.mode == Bubble.Mode.HIDDEN, "...and the linger timer fades it even while listening for a follow-up")
+	main.settings.set_value("captions", false)
+	main.bubble.show_answer("q", "Normal answer.", [], false)
+	check(not main._captions_keep_answer(), "with captions off it is replaced by the follow-up prompt as before")
+	# panic: hidden, silent, deaf, not clickable, and everything comes back
+	main.app_state = main.AppState.IDLE
+	main.speaker.stop()
+	main.mic_muted = false
+	var before := _count("set_mute", "muted", true)
+	main.speaker.speak("Something being said right now, long enough to interrupt.")
+	main.bridge._handle_line('{"event":"panic"}')          # the helper's panic hotkey event, through the real line parser
+	check(main._panic and not main.speaker.is_speaking() and is_equal_approx(main.modulate.a, 0.0), "the panic hotkey hides Filo and stops the speech at once")
+	check(main.interactive_rects().is_empty() and main.window_state.passthrough == true, "nothing is clickable while hidden")
+	check(main.mic_muted and await _wait_for(func() -> bool: return _count("set_mute", "muted", true) > before), "the microphone is muted (the helper got set_mute) so nothing is heard")
+	check(not main.settings.get_value("mic_muted"), "...without saving that as the user's own mute setting")
+	main._on_hotkey_down()
+	main._on_wake_word("hey filo")
+	check(main.app_state == main.AppState.IDLE or main.app_state == main.AppState.ASLEEP, "hotkey and wake word are ignored while hidden (state %s)" % main.AppState.keys()[main.app_state])
+	main.bridge._handle_line('{"event":"panic"}')
+	check(not main._panic and is_equal_approx(main.modulate.a, float(main.settings.get_value("overlay_opacity"))) and not main.mic_muted, "pressing it again brings Filo back with the microphone as it was")
+	check(main.interactive_rects().size() >= 1, "and the controls are clickable again")

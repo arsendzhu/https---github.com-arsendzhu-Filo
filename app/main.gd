@@ -24,6 +24,7 @@ var bridge: HelperBridge
 var mascot: Mascot
 var bubble: Bubble
 var input_panel: InputPanel
+var history_panel: HistoryPanel
 var controls: ControlBar
 var hint: Label
 var pipeline: AnswerPipeline
@@ -64,6 +65,8 @@ var mic_mute_confirmed := false # the helper acknowledged the last set_mute
 var window_state := {"passthrough": true, "unfocusable": true}   # the click-through / focus mode last requested for the window
 var _mute_deadline := 0.0
 var _focus_saved := false       # focus_save was sent, focus_restore is owed
+var _panic := false                # the panic hotkey hid Filo: nothing is shown, heard or clickable until it is pressed again
+var _pre_panic_mic_muted := false
 var _dragging := false            # the window is being dragged by the status grip
 var _drag_mouse0 := Vector2i.ZERO
 var _drag_win0 := Vector2i.ZERO
@@ -183,6 +186,9 @@ func _build_ui() -> void:
 
 	controls = ControlBar.new()
 	add_child(controls)
+	history_panel = HistoryPanel.new()
+	add_child(history_panel)
+	controls.history_button.pressed.connect(_toggle_history)
 	controls.status.drag_started.connect(func() -> void: _begin_drag(DisplayServer.mouse_get_position()))
 	controls.status.drag_ended.connect(_end_drag)
 
@@ -270,6 +276,7 @@ func _start_helper() -> void:
 	bridge.apps.connect(_on_apps)
 	bridge.helper_error.connect(_on_helper_error)
 	bridge.mute_state.connect(_on_mute_state)
+	bridge.panic.connect(_on_panic)
 	var port := int(cfg.get_value("helper.port", 47821))
 	if bridge.start_listening(port) != OK:
 		call_deferred("_notice", "I couldn't open port %d for the hotkey helper. Is another Filo running?" % port)
@@ -298,6 +305,8 @@ func _helper_extra_flags() -> PackedStringArray:
 		flags.append("--no-keep-warm")
 	if bool(cfg.get_value("speech.voice_barge_in", false)):
 		flags.append("--voice-barge-in")
+	if str(cfg.get_value("hotkey_panic.key", "")).strip_edges() != "":
+		flags.append_array(PackedStringArray(["--panic-key", str(cfg.get_value("hotkey_panic.key", "h")), "--panic-mods", ",".join(PackedStringArray(cfg.get_value("hotkey_panic.modifiers", [])))]))
 	if bool(cfg.get_value("debug.save_audio", false)):
 		flags.append_array(PackedStringArray(["--debug-audio-dir", cfg.resolve_path(str(cfg.get_value("debug.audio_dir", "logs/audio"))), "--debug-audio-keep", str(cfg.get_value("debug.audio_keep", 20))]))
 	if _mute_hotkey_enabled():
@@ -487,6 +496,8 @@ func _on_apps(list: Array) -> void:
 # ------------------------------------------------------------- interactions
 
 func _on_hotkey_down() -> void:
+	if _panic:
+		return
 	_last_partial = ""
 	_pending_final = false
 	_has_queued_final = false
@@ -511,6 +522,8 @@ func _on_hotkey_down() -> void:
 
 ## The helper heard the wake phrase; it keeps listening and sends the question as `final`.
 func _on_wake_word(_phrase: String) -> void:
+	if _panic:
+		return
 	FiloLog.info("Wake word heard")
 	_last_partial = ""
 	_pending_final = true
@@ -541,6 +554,8 @@ func _on_hotkey_up(_duration_ms: int) -> void:
 
 
 func _on_tap() -> void:
+	if _panic:
+		return
 	# The helper reports hotkey_down first (we may already be LISTENING), then
 	# decides it was a tap; act on the state the press started from. A tap while
 	# Filo is awake dismisses it; a tap while asleep opens the typed question.
@@ -674,6 +689,12 @@ func _on_typed_submitted(text: String) -> void:
 	if lower == "/quit":
 		quit()
 		return
+	if lower == "/history":
+		_toggle_history()
+		return
+	if lower == "/panic":
+		_on_panic()
+		return
 	if lower == "/help":
 		bubble.show_info("%s, or tap %s to type. Commands: /glint, /sleep, /quit, /help.  %s" % [_activation_sentence(), cfg.hotkey_label(), SettingCommands.HELP])
 		return
@@ -772,6 +793,7 @@ func _ask(question: String, source: String = "voice", level: String = "") -> voi
 	mascot.animator.register_turn()
 	_send_vocabulary()
 	_had_first_answer = true
+	history_panel.add_entry(question, str(result.text), str(result.get("game", "")))
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)), _can_expand(result))
 	_speak(result.spoken, "answer")
@@ -832,6 +854,7 @@ func _finish_streamed_answer(question: String, result: Dictionary, head: String)
 	mascot.animator.register_turn()
 	_send_vocabulary()
 	_had_first_answer = true
+	history_panel.add_entry(question, str(result.text), str(result.get("game", "")))
 	var full := str(result.text)
 	bubble.update_answer(full, result.sources, bool(result.get("used_web", false)), _can_expand(result))
 	if not speaker.is_speaking():
@@ -891,7 +914,11 @@ func _reprompt() -> void:
 	_speech_kind = "reprompt"
 	app_state = AppState.ANSWERING
 	mascot.animator.react_after_answer()
-	bubble.show_followup(phrase, str(cfg.get_value("wake_word.bye_phrase", "bye filo")), cfg.hotkey_label())
+	if _captions_keep_answer():
+		# captions: the answer stays readable (and fades on its own) instead of being replaced by the prompt
+		linger_timer.start(float(cfg.get_value("behavior.caption_seconds", 8.0)))
+	else:
+		bubble.show_followup(phrase, str(cfg.get_value("wake_word.bye_phrase", "bye filo")), cfg.hotkey_label())
 	_speak(phrase, "reprompt")
 
 
@@ -906,7 +933,8 @@ func _open_followup_listening() -> void:
 	final_timer.start(seconds + 25.0)
 	bridge.send({"cmd": "listen_open", "timeout_ms": int(seconds * 1000.0)})
 	_set_state(AppState.LISTENING)
-	bubble.show_listening("", true)
+	if not _captions_keep_answer():
+		bubble.show_listening("", true)
 
 
 ## Follow-up in text mode: an empty text field opens instead of the mic —
@@ -1144,9 +1172,10 @@ func _on_mic_button_pressed() -> void:
 	set_mic_muted(not mic_muted, "button")
 
 
-func set_mic_muted(muted: bool, source: String) -> void:
+func set_mic_muted(muted: bool, source: String, persist: bool = true) -> void:
 	mic_muted = muted
-	_save_setting("mic_muted", muted)
+	if persist:
+		_save_setting("mic_muted", muted)
 	mic_mute_confirmed = false
 	controls.mic_button.set_muted(muted)
 	FiloLog.info("Microphone %s (%s)" % ["muted" if muted else "unmuted", source])
@@ -1161,7 +1190,7 @@ func set_mic_muted(muted: bool, source: String) -> void:
 		_mute_deadline = Time.get_ticks_msec() / 1000.0 + 2.0
 	else:
 		FiloLog.warn("No helper connected: the mute is only visual until it connects")
-	if app_state != AppState.ASLEEP:
+	if app_state != AppState.ASLEEP and source != "panic":
 		var hotkey := " or press %s" % cfg.hotkey_label("hotkey_mute") if _mute_hotkey_enabled() else ""
 		bubble.show_info("Microphone muted. Click the mic again%s to unmute." % hotkey if muted else "Microphone is back on.")
 
@@ -1246,6 +1275,9 @@ func _layout_controls() -> void:
 	want.y = clampf(want.y, 4.0, maxf(4.0, pts.y - controls.size.y - 4.0))
 	if controls.position != want:
 		controls.position = want
+	if history_panel.is_open():
+		history_panel.size = history_panel.panel.size
+		history_panel.position = Vector2(clampf(controls.position.x + controls.size.x - history_panel.panel.size.x, 4.0, maxf(4.0, pts.x - history_panel.panel.size.x - 4.0)), maxf(4.0, controls.position.y - history_panel.panel.size.y - 8.0))
 	# the activation hint sits to the left of the bar, on the same row (two short lines)
 	hint.size = Vector2(maxf(40.0, controls.position.x - 10.0), controls.size.y)
 	hint.position = Vector2(4.0, controls.position.y)
@@ -1254,7 +1286,12 @@ func _layout_controls() -> void:
 
 ## Rects (window-local points) that must take clicks right now.
 func interactive_rects() -> Array:
-	return controls.interactive_rects()
+	if _panic:
+		return []
+	var rects: Array = controls.interactive_rects()
+	if history_panel.is_open():
+		rects.append(history_panel.rect_global())
+	return rects
 
 
 ## The window is click-through everywhere except over the controls, so the game underneath stays
@@ -1348,7 +1385,7 @@ func _on_idle_timeout() -> void:
 
 
 func _on_linger_timeout() -> void:
-	if app_state in [AppState.IDLE, AppState.TYPING]:
+	if app_state in [AppState.IDLE, AppState.TYPING] or (app_state == AppState.LISTENING and bubble.mode == Bubble.Mode.ANSWER):
 		bubble.hide_bubble()
 
 
@@ -1425,3 +1462,51 @@ func quit() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		quit()
+
+
+# ------------------------------------------------------------- captions, history, panic
+
+func _captions_keep_answer() -> bool:
+	return settings != null and bool(settings.get_value("captions")) and bubble.mode == Bubble.Mode.ANSWER
+
+
+func _toggle_history() -> void:
+	history_panel.toggle()
+	controls.history_button.set_active(history_panel.is_open())
+
+
+## The panic hotkey (or /panic): Filo disappears at once - silent, blind (the mic is muted), invisible and not
+## clickable - until the hotkey is pressed again, which restores everything as it was.
+func _on_panic() -> void:
+	_set_panic(not _panic)
+
+
+func _set_panic(on: bool) -> void:
+	if on == _panic:
+		return
+	_panic = on
+	FiloLog.info("Panic: Filo is %s" % ("hidden" if on else "back"))
+	if on:
+		_interrupt_speech()
+		_pending_final = false
+		_followup = false
+		final_timer.stop()
+		if bridge:
+			bridge.send({"cmd": "listen_stop"})
+		if input_panel.is_open():
+			input_panel.close()
+		if history_panel.is_open():
+			_toggle_history()
+		bubble.hide_bubble()
+		_pre_panic_mic_muted = mic_muted
+		set_mic_muted(true, "panic", false)
+		modulate.a = 0.0
+		mascot.set_rendering(false)
+		if app_state not in [AppState.ASLEEP, AppState.SLEEPING]:
+			app_state = AppState.ASLEEP
+		_apply_window_mode()
+	else:
+		set_mic_muted(_pre_panic_mic_muted, "panic", false)
+		modulate.a = float(settings.get_value("overlay_opacity"))
+		_set_fps(false)
+		_apply_window_mode()

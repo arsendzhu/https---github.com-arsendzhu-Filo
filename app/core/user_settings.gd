@@ -158,6 +158,9 @@ func apply_to(cfg: FiloConfig) -> void:
 	var hk: Dictionary = get_value("hotkey")
 	if hk != SCHEMA.hotkey.default:
 		cfg.data["hotkey"] = hk.duplicate(true)
+	var ph: Dictionary = get_value("panic_hotkey")
+	if ph != SCHEMA.panic_hotkey.default:
+		cfg.data["hotkey_panic"] = ph.duplicate(true)
 	var mh: Dictionary = get_value("mute_hotkey")
 	if mh != SCHEMA.mute_hotkey.default:
 		cfg.data["hotkey_mute"] = mh.duplicate(true)

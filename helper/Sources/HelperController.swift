@@ -10,6 +10,7 @@ final class HelperController {
     private var speech: SpeechCapture?
     private var wake: WakeListener?
     private var muteHotKey: HotKey?
+    private var panicHotKey: HotKey?
     private var micMuted = false
     private var filoSpeaking = false
     private var frontApp: NSRunningApplication?    // the last app that was in front and is not Filo (the game)
@@ -48,6 +49,7 @@ final class HelperController {
             Log.info("connected")
             self.setupHotkey()
             self.setupMuteHotkey()
+            self.setupPanicHotkey()
             self.trackFrontApp()
             if !self.options.noSpeech {
                 let speech = SpeechCapture(localeId: self.options.locale, allowServer: self.options.allowServerSpeech, audio: self.audio, settings: self.settings) { [weak self] in
@@ -87,6 +89,18 @@ final class HelperController {
         } else {
             Log.info("hotkey registered: \(hotkeyLabel())")
         }
+    }
+
+    /// Hides Filo instantly from anywhere (and again to bring it back): the app does the hiding, the helper only
+    /// reports the key, so it works even when the overlay itself cannot be clicked.
+    private func setupPanicHotkey() {
+        guard !options.panicKey.isEmpty, let code = KeyCodes.code(for: options.panicKey) else { return }
+        panicHotKey = HotKey(id: 3, keyCode: code, modifiers: KeyCodes.modifiers(for: options.panicMods)) { [weak self] pressed in
+            guard pressed, let self = self else { return }
+            Log.info("panic hotkey")
+            self.bridge.send(["event": "panic"])
+        }
+        Log.info(panicHotKey == nil ? "could not register the panic hotkey" : "panic hotkey registered: \((options.panicMods + [options.panicKey]).joined(separator: "+"))")
     }
 
     /// The microphone engine may idle "warm" (so the last ~450 ms of audio is always buffered) only while the

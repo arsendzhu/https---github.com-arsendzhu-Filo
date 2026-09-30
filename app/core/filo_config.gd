@@ -62,6 +62,7 @@ const DEFAULTS := {
 	"default_profile": "sekiro",
 	"profiles_dir": "profiles",
 	"hotkey": {"key": "space", "modifiers": ["option"]},
+	"hotkey_panic": {"key": "h", "modifiers": ["control", "option"]},   # hides Filo instantly (and again to bring it back); key "" disables it
 	"hotkey_mute": {"key": "m", "modifiers": ["control", "option"]},   # backup for the mic mute button; key "" disables it
 	"helper": {
 		"enabled": true,
@@ -91,6 +92,7 @@ const DEFAULTS := {
 		"answer_linger": 0.0,
 		"greet_on_launch": true,
 		"greet_linger": 8.0,
+		"caption_seconds": 8.0,       # with captions on, an answer stays this long after it was spoken, then fades
 		"reprompt": true,
 		"acknowledge": true,          # say "let me check that" when a tool-loop answer takes longer than ack_after_seconds
 		"ack_after_seconds": 1.2,
