@@ -155,6 +155,16 @@ static func load_default(args: Dictionary = {}) -> FiloConfig:
 	var env_nim_model := env_or_dotenv(dotenv, "FILO_NIM_MODEL")
 	if env_nim_model != "":
 		cfg.data["nim"]["model"] = env_nim_model
+	# Endpoint overrides from the environment (used by the test and measurement scripts so nothing can reach a real API).
+	var nim_base_env := OS.get_environment("FILO_NIM_BASE")
+	if nim_base_env != "":
+		cfg.data["nim"]["base_url"] = nim_base_env
+	var api_base_env := OS.get_environment("FILO_API_BASE")
+	if api_base_env != "":
+		cfg.data["api_base_url"] = api_base_env
+	var wiki_base_env := OS.get_environment("FILO_WIKI_BASE")
+	if wiki_base_env != "":
+		cfg.data["web_search"]["wikipedia"]["base_url"] = wiki_base_env
 	cfg.apply_args(args)
 	cfg.normalize_keys()
 	return cfg

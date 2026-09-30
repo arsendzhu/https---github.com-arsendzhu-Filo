@@ -18,6 +18,9 @@ mkdir -p "$OUT"
 PY="$(command -v python3)"
 FAILED=0
 export FILO_SETTINGS_PATH="$OUT/settings.json"     # no test may touch the real settings.json
+# ...and no test may reach a real API: every endpoint points at a closed local port unless a scenario passes the mock's
+# address (--api-base / --nim-base / --wiki-base). The app loads the project's .env by itself, so this is enforced in the app.
+export FILO_NIM_BASE=http://127.0.0.1:9/v1 FILO_API_BASE=http://127.0.0.1:9 FILO_WIKI_BASE=http://127.0.0.1:9
 echo "Test output: $OUT"
 
 expect() {  # expect <logfile> <pattern> <description>
@@ -195,7 +198,7 @@ expect "$OUT/ui.log" ", 0 failed" "UI controls, passthrough geometry and IPC rou
 no_script_errors "$OUT/ui.log"
 
 echo "== 3/4 showcase captures"
-"$GODOT" --path "$ROOT/app" -- --showcase --capture-dir "$OUT/captures" --mute --no-helper --tts-provider system --quit-after 70 > "$OUT/showcase.log" 2>&1
+ANTHROPIC_API_KEY=test-key NVIDIA_API_KEY=nvapi-test "$GODOT" --path "$ROOT/app" -- --showcase --capture-dir "$OUT/captures" --mute --no-helper --tts-provider system --quit-after 70 > "$OUT/showcase.log" 2>&1
 COUNT=$(ls "$OUT/captures" 2>/dev/null | grep -c "_review.png")
 echo "  captured $COUNT review frames in $OUT/captures"
 if [[ "$COUNT" -lt 24 ]]; then echo "  FAIL: expected at least 24 review frames"; FAILED=1; fi
