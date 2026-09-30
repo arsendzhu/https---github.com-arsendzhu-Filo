@@ -31,6 +31,7 @@ func _init() -> void:
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
 	await _test_prefetch()
+	await _test_speaker_continuation()
 	await _test_streaming_and_pacing()
 	await _test_streaming_agent()
 	_test_speech_terms()
@@ -1315,3 +1316,76 @@ func _test_streaming_agent() -> void:
 	r = await p.research.answer("Question: y", "G", {})
 	check(s.calls[2].opts.stream == false, "...and not tried again for that model")
 	p.free()
+
+
+# ---------------------------------------------------- speaking the first sentence while the rest is written (workstream 4)
+
+func _test_speaker_continuation() -> void:
+	# simulated voice (no audio device needed): timing follows the words
+	var sp := Speaker.new()
+	root.add_child(sp)
+	sp.enabled = false          # muted config -> the simulated provider
+	sp._sim_timer = Timer.new()
+	sp._sim_timer.one_shot = true
+	sp.add_child(sp._sim_timer)
+	sp._sim_timer.timeout.connect(sp._sim_step)
+	sp._player = AudioStreamPlayer.new()
+	sp.add_child(sp._player)
+	var events := []
+	sp.started.connect(func(_i: int) -> void: events.append("started"))
+	sp.finished.connect(func(_i: int) -> void: events.append("finished"))
+	sp.cancelled.connect(func(_i: int) -> void: events.append("cancelled"))
+	sp.boundary.connect(func(pos: int, _i: int) -> void: events.append(pos))
+	# head with more to come, tail appended while the head is still being spoken
+	sp.speak("Dodge its charges early.", true)
+	await create_timer(0.15).timeout
+	sp.append("Then fight the servants.")
+	for _i in 60:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	var head_len := "Dodge its charges early.".length()
+	var starts := events.filter(func(e) -> bool: return typeof(e) == TYPE_INT)
+	check(events.count("started") == 1 and events.count("finished") == 1 and events.back() == "finished" and not events.has("cancelled"), "continuation: one started and ONE finished for the head + tail utterance: " + str(events.filter(func(e) -> bool: return typeof(e) != TYPE_INT)))
+	check(starts.size() == 8 and starts[0] == 0 and starts[4] == head_len + 1 and starts[7] == head_len + 1 + "Then fight the ".length(), "continuation: the tail's word positions continue after the head's (%s)" % str(starts))
+	check(not sp.is_speaking(), "continuation: the speaker is idle afterwards")
+	# the tail arrives after the head has finished: the utterance waits for it
+	events.clear()
+	sp.speak("Use fire arrows here.", true)
+	for _i in 40:
+		if sp._head_done:
+			break
+		await create_timer(0.1).timeout
+	check(sp._head_done and sp.is_speaking() and not events.has("finished"), "continuation: a finished head waits for the tail instead of ending the utterance")
+	sp.append("They stagger it.")
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("finished") == 1 and starts.size() > 0, "continuation: a late tail is spoken, then one finished")
+	# no tail after all
+	events.clear()
+	sp.speak("Just this one sentence here.", true)
+	sp.end_stream()
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("finished") == 1, "continuation: end_stream() with no tail finishes after the head")
+	# barge-in cancels everything, including a pending tail
+	events.clear()
+	sp.speak("Long answer being spoken now.", true)
+	await create_timer(0.1).timeout
+	sp.stop()
+	sp.append("This must never be spoken.")
+	await create_timer(0.5).timeout
+	check(events.has("cancelled") and not events.has("finished") and not sp.is_speaking(), "continuation: stop() cancels the utterance and a later append() is ignored")
+	# a plain single utterance is unchanged
+	events.clear()
+	sp.speak("A plain single sentence answer.")
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("started") == 1 and events.count("finished") == 1, "a plain utterance (no continuation) behaves as before")
+	sp.queue_free()

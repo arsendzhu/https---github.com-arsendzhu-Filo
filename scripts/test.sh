@@ -177,6 +177,7 @@ expect "$OUT/e2e_prefetch.log" "ANSWER (live-model, web): According to the Dark 
 expect "$OUT/e2e_prefetch.log" "SOURCE: Lordvessel" "the prefetched page is cited"
 expect "$OUT/mock_api.log" "mock_nim_tools: model=live-model tool_choice=auto last=tool" "the first model request already carried the tool results"
 expect "$OUT/e2e_prefetch.log" ", streamed" "the answer was streamed"
+expect "$OUT/e2e_prefetch.log" "Streaming: speaking the first sentence while the rest is still being written" "speech started on the first sentence while the rest was still arriving"
 expect "$OUT/e2e_prefetch.log" "first token" "time to first token is logged for every request"
 no_script_errors "$OUT/e2e_prefetch.log"
 

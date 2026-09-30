@@ -134,6 +134,19 @@ func show_answer(question: String, text: String, sources: Array, used_web: bool)
 	footer.visible = src != ""
 
 
+## The full answer arrived after only its first sentence was shown (streamed speech): swap the text in place,
+## keeping how much of it has been revealed so far.
+func update_answer(text: String, sources: Array, used_web: bool) -> void:
+	if mode != Mode.ANSWER:
+		return
+	var keep := body.visible_characters
+	_set_body(text)
+	body.visible_characters = keep
+	var src := format_sources(sources, used_web)
+	footer.text = src
+	footer.visible = src != ""
+
+
 func show_error(message: String) -> void:
 	_set_mode(Mode.ERROR)
 	header.text = "Hmm"

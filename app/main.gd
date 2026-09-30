@@ -392,6 +392,7 @@ func _on_hotkey_down() -> void:
 			input_panel.close()
 			_enter_listening()
 		AppState.ANSWERING:
+			_answer_token += 1        # a still-streaming answer must not overwrite what happens next
 			speaker.stop()
 			_enter_listening()
 		AppState.THINKING:
@@ -418,6 +419,7 @@ func _on_wake_word(_phrase: String) -> void:
 			input_panel.close()
 			_enter_listening()
 		AppState.ANSWERING:
+			_answer_token += 1        # a still-streaming answer must not overwrite what happens next
 			speaker.stop()
 			_enter_listening()
 		AppState.THINKING:
@@ -632,9 +634,17 @@ func _ask(question: String, source: String = "voice") -> void:
 	_answer_token += 1
 	var token := _answer_token
 	FiloLog.info("QUESTION: " + question)
-	var result: Dictionary = await pipeline.ask(question)
-	if token != _answer_token or app_state != AppState.THINKING:
+	# The first sentence of a streamed answer is spoken while the rest is still being written.
+	var streamed := {"head": ""}
+	var on_sentence := Callable()
+	if bool(cfg.get_value("tts.stream_first_sentence", true)):
+		on_sentence = func(sentence: String) -> void: _on_streamed_head(token, question, sentence, streamed)
+	var result: Dictionary = await pipeline.ask(question, on_sentence)
+	if token != _answer_token or (streamed.head == "" and app_state != AppState.THINKING):
 		FiloLog.debug("Answer discarded (superseded)")
+		return
+	if streamed.head != "":
+		_finish_streamed_answer(question, result, streamed.head)
 		return
 	if not bool(result.get("ok", false)):
 		FiloLog.warn("ANSWER FAILED: " + str(result.get("error", "")))
@@ -652,6 +662,43 @@ func _ask(question: String, source: String = "voice") -> void:
 	_set_state(AppState.ANSWERING)
 	bubble.show_answer(question, result.text, result.sources, bool(result.get("used_web", false)))
 	_speak(result.spoken, "answer")
+
+
+func _on_streamed_head(token: int, question: String, sentence: String, streamed: Dictionary) -> void:
+	if token != _answer_token or app_state != AppState.THINKING or streamed.head != "":
+		return
+	streamed.head = sentence
+	FiloLog.info("Streaming: speaking the first sentence while the rest is still being written")
+	_set_state(AppState.ANSWERING)
+	bubble.show_answer(question, sentence, [], true)
+	_speak(sentence, "answer", true)
+
+
+## The whole answer is here; its first sentence is already being spoken. Append the rest (or end the utterance).
+func _finish_streamed_answer(question: String, result: Dictionary, head: String) -> void:
+	if not bool(result.get("ok", false)):
+		FiloLog.warn("ANSWER FAILED after its first sentence was spoken: " + str(result.get("error", "")))
+		speaker.end_stream()
+		return
+	FiloLog.info("ANSWER (%s%s): %s" % [str(result.get("model", "")), ", web" if result.get("used_web", false) else "", result.text])
+	for s in result.sources:
+		FiloLog.info("SOURCE: %s — %s" % [s.title, s.url])
+	mascot.animator.register_turn()
+	_send_vocabulary()
+	_had_first_answer = true
+	var full := str(result.text)
+	bubble.update_answer(full, result.sources, bool(result.get("used_web", false)))
+	if not speaker.is_speaking():
+		bubble.reveal_all()          # muted or interrupted meanwhile: the text is all there is
+		return
+	var tail := full.substr(head.length()).strip_edges() if full.begins_with(head) else ""
+	if tail == "":
+		if not full.begins_with(head):
+			FiloLog.warn("The streamed first sentence is not the start of the final answer; not speaking the rest")
+		speaker.end_stream()
+	else:
+		speech_watchdog.start(clampf(full.length() * 0.16, 8.0, 60.0))
+		speaker.append(tail)
 
 
 ## Voice commands recognised by the pipeline (no model, no tools): stop, mute, unmute, repeat.
@@ -722,11 +769,12 @@ func _open_followup_typing() -> void:
 ## failure mode we didn't foresee), the watchdog forces the same completion
 ## path a normal finish would take, so the app can never get stuck answering
 ## and the mic is never left permanently unavailable.
-func _speak(text: String, kind: String) -> void:
+func _speak(text: String, kind: String, expect_more: bool = false) -> void:
 	_speech_kind = kind
-	var seconds := clampf(text.length() * 0.16, 8.0, 60.0)
+	# a streamed head waits for the rest of the answer, which can take a while: give it the model timeout on top
+	var seconds := clampf(text.length() * 0.16, 8.0, 60.0) + (30.0 if expect_more else 0.0)
 	speech_watchdog.start(seconds)
-	speaker.speak(text)
+	speaker.speak(text, expect_more)
 
 
 func _on_speech_watchdog() -> void:
