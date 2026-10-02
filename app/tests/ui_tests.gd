@@ -443,20 +443,45 @@ func _test_onboarding() -> void:
 	check(ob.hotkey_seen and main.app_state == state_before and ob.hotkey_status.text.contains("Got it"), "pressing the hotkey ticks the hotkey step and does not start listening")
 	# voice test
 	main.speaker.last_text = ""
+	var was_enabled: bool = main.speaker.enabled
+	main.speaker.enabled = true                         # this run is --mute; the test needs a voice (simulated here)
 	ob.panel.find_child("VoiceTest", true, false).pressed.emit()
 	check(main.speaker.last_text.contains("Filo"), "the voice test speaks: '%s'" % main.speaker.last_text)
+	check(ob.voice_status.text != "", "...and the panel says what is happening: '%s'" % ob.voice_status.text)
 	main.speaker.stop()
+	main.speaker.enabled = was_enabled
 	# game picker
-	check(ob.games.size() >= 1, "the game list has the installed profiles (%d)" % ob.games.size())
+	var game_names := ob.games.map(func(g: Dictionary) -> String: return str(g.name))
+	check(ob.games.size() >= 4 and game_names.any(func(n: String) -> bool: return n.contains("Sekiro")) and "Terraria" in game_names and "Dark Souls" in game_names and "Crimson Desert" in game_names, "the picker lists all four starter games, not only the one with notes: " + str(game_names))
 	var before: String = main.profile.id
-	ob.panel.find_child("GameNext", true, false).pressed.emit()
-	check(main.settings.get_value("game") == ob.games[ob.game_index].id and main.profile.id == ob.games[ob.game_index].id, "choosing a game loads its profile and saves the choice (%s -> %s)" % [before, main.profile.id])
+	var seen_profiles := []
+	for i in ob.games.size():
+		ob.panel.find_child("GameNext", true, false).pressed.emit()
+		seen_profiles.append(main.profile.name)
+		check(main.settings.get_value("game") == ob.games[ob.game_index].id and main.profile.id == ob.games[ob.game_index].id, "choosing '%s' loads it and saves the choice" % ob.games[ob.game_index].name)
+	check("Terraria" in seen_profiles and seen_profiles.size() == ob.games.size(), "every button press switches the game: " + str(seen_profiles))
+	check(ob.game_note.text.begins_with("Now helping with"), "the panel says which game is active: '%s'" % ob.game_note.text)
+	main._on_onboarding_game("terraria")
+	check(main.profile.name == "Terraria" and main.profile.notes.is_empty() and main.pipeline.session.game == "", "a game without notes works (the wiki answers) and starts a fresh conversation")
+	# the voice test says what it did
+	main.speaker.set_muted(true)
+	ob.panel.find_child("VoiceTest", true, false).pressed.emit()
+	check(ob.voice_status.text.contains("muted"), "with the voice muted the test explains why nothing is heard: '%s'" % ob.voice_status.text)
+	main.speaker.set_muted(false)
+	# dismissing Filo takes the panel with it
+	main.app_state = main.AppState.IDLE
+	main._sleep()
+	check(not ob.is_open(), "dismissing Filo closes the setup panel")
+	main._start_onboarding()
+	check(ob.is_open(), "(reopened for the next step)")
 	# done
 	var off_before := _count("mic_test", "on", false)
 	ob.panel.find_child("Done", true, false).pressed.emit()
 	check(not ob.is_open() and main.settings.get_value("onboarded") == true, "Done closes the panel and remembers that setup was done")
 	check(await _wait_for(func() -> bool: return _count("mic_test", "on", false) > off_before), "the meter was switched off again")
 	main._on_onboarding_game(before)       # leave the profile as it was for the tests after this one
+	ob.close()
+	_start_closed_check(ob)
 
 
 func test_keyboard_only_controls() -> void:
@@ -491,3 +516,9 @@ func _test_unconfirmed_mute_is_reported() -> void:
 	check(main.speaker.last_text.contains("isn't confirmed"), "...and spoken: '%s'" % main.speaker.last_text)
 	main.speaker.stop()
 	main._error_until = 0.0
+
+
+func _start_closed_check(ob: OnboardingPanel) -> void:
+	main._start_onboarding()
+	ob.panel.find_child("Close", true, false).pressed.emit()
+	check(not ob.is_open() and main.settings.get_value("onboarded") == true, "the close button also finishes setup and hides the panel")

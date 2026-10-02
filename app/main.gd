@@ -199,7 +199,7 @@ func _build_ui() -> void:
 	onboarding.mic_test_requested.connect(func(on: bool) -> void:
 		if bridge != null and helper_connected:
 			bridge.send({"cmd": "mic_test", "on": on}))
-	onboarding.voice_test_requested.connect(func() -> void: _speak("Hi, I'm Filo. Can you hear me okay?", "info"))
+	onboarding.voice_test_requested.connect(_on_onboarding_voice_test)
 	onboarding.game_selected.connect(_on_onboarding_game)
 	onboarding.finished.connect(_finish_onboarding)
 	controls.history_button.pressed.connect(_toggle_history)
@@ -1092,6 +1092,10 @@ func _sleep() -> void:
 	_answer_token += 1
 	_pending_final = false
 	_followup = false
+	if onboarding != null and onboarding.is_open():
+		onboarding.close()              # dismissing Filo takes the setup panel (and the history) with it
+	if history_panel != null and history_panel.is_open():
+		_toggle_history()
 	_followup_mode = str(settings.get_value("followup_mode")) if settings != null else "voice"
 	_had_first_answer = false
 	controls.mode_button.set_mode(_followup_mode)
@@ -1459,11 +1463,51 @@ func _on_linger_timeout() -> void:
 func _load_profile(profile_id: String) -> void:
 	if _profile_cache.has(profile_id):
 		profile = _profile_cache[profile_id]
-	else:
+	elif FileAccess.file_exists(profiles_dir.path_join(profile_id).path_join("profile.json")):
 		profile = GameProfile.load_from(profiles_dir, profile_id)
+		_profile_cache[profile_id] = profile
+	else:
+		# a game that has no notes folder (Terraria, Dark Souls, ...): no local notes, the wiki/web tools answer
+		profile = _generic_profile(profile_id)
 		_profile_cache[profile_id] = profile
 	if profile.load_error != "":
 		FiloLog.warn("Profile problem: " + profile.load_error)
+
+
+## Every game Filo knows: the profiles with notes, the games in profiles/vocabulary.json and the configured wikis.
+## [{id, name}] - the id is the profile folder when there is one, otherwise a slug of the name.
+func _known_games() -> Array:
+	var out := []
+	var seen := []
+	for pid in GameProfile.list_profiles(profiles_dir):
+		if not _profile_cache.has(pid):
+			_profile_cache[pid] = GameProfile.load_from(profiles_dir, pid)
+		out.append({"id": pid, "name": _profile_cache[pid].name})
+		seen.append(_profile_cache[pid].name)
+	var names := []
+	for k in SpeechVocabulary.load_table(profiles_dir):
+		names.append(str(k))
+	for k in ResearchAgent.normalize_wikis(cfg.get_value("research.wikis", {})):
+		names.append(str(k).capitalize() if str(k) == str(k).to_lower() else str(k))
+	for n in names:
+		var known := false
+		for s in seen:
+			if QueryRouter.same_game(str(n), str(s)):
+				known = true
+		if not known:
+			seen.append(n)
+			out.append({"id": QueryRouter.normalize(str(n)).replace(" ", "_"), "name": str(n)})
+	return out
+
+
+func _generic_profile(profile_id: String) -> GameProfile:
+	var p := GameProfile.new()
+	p.id = profile_id
+	p.name = profile_id.replace("_", " ").capitalize()
+	for g in _known_games():
+		if str(g.id) == profile_id:
+			p.name = str(g.name)
+	return p
 
 
 func _wake_enabled() -> bool:
@@ -1583,12 +1627,7 @@ func _set_panic(on: bool) -> void:
 func _start_onboarding() -> void:
 	if _panic or onboarding.is_open():
 		return
-	var list := []
-	for pid in GameProfile.list_profiles(profiles_dir):
-		if not _profile_cache.has(pid):
-			_profile_cache[pid] = GameProfile.load_from(profiles_dir, pid)
-		list.append({"id": pid, "name": _profile_cache[pid].name})
-	onboarding.set_games(list, profile.id if profile != null else "")
+	onboarding.set_games(_known_games(), profile.id if profile != null else "")
 	onboarding.open(cfg.hotkey_label())
 	if bridge != null and helper_connected:
 		bridge.send({"cmd": "list_mics"})
@@ -1606,12 +1645,25 @@ func _on_onboarding_game(id: String) -> void:
 	_save_setting("game", id)
 	_load_profile(id)
 	pipeline.set_profile(profile)
+	pipeline.session.clear()            # a new game starts a fresh conversation
 	_vocab_sent = ""
 	_send_vocabulary()
-	FiloLog.info("Game chosen in setup: %s" % profile.name)
+	FiloLog.info("Onboarding: game chosen: %s (%s)" % [profile.name, profile.id])
+	onboarding.set_game_note("Now helping with %s%s" % [profile.name, "" if profile.notes.size() > 0 else " (no local notes: I use the wiki)"])
+
+
+func _on_onboarding_voice_test() -> void:
+	var provider := speaker.active_provider()
+	FiloLog.info("Onboarding: voice test (voice: %s)" % provider)
+	if provider == "muted":
+		onboarding.set_voice_status("The voice is muted - click the speaker button (or /voice on), then try again.")
+		return
+	onboarding.set_voice_status("Playing…" if provider != "simulated" else "No voice is installed, so I can only show text.")
+	_speak("Hi, I'm Filo. Can you hear me okay?", "info")
 
 
 func _finish_onboarding() -> void:
+	FiloLog.info("Onboarding finished")
 	_save_setting("onboarded", true)
 	onboarding.close()
 	speaker.stop()

@@ -26,6 +26,8 @@ var mic_name: Label
 var meter: ProgressBar
 var hotkey_status: Label
 var game_name: Label
+var voice_status: Label
+var game_note: Label
 var _level := 0.0
 
 
@@ -49,7 +51,12 @@ func _ready() -> void:
 	box.add_theme_constant_override("separation", 8)
 	box.custom_minimum_size = Vector2(390.0, 0.0)
 	panel.add_child(box)
-	box.add_child(_label("Let's get set up", 16, Color("f6efe4")))
+	var title_row := HBoxContainer.new()
+	var title := _label("Let's get set up", 16, Color("f6efe4"))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_child(title)
+	title_row.add_child(_button("✕", func() -> void: finished.emit(), "Close"))
+	box.add_child(title_row)
 	# 1 microphone
 	box.add_child(_label("1  Microphone", 12, DIM))
 	var mic_row := HBoxContainer.new()
@@ -75,6 +82,10 @@ func _ready() -> void:
 	# 3 voice
 	box.add_child(_label("3  Voice", 12, DIM))
 	box.add_child(_button("Play a test sentence", func() -> void: voice_test_requested.emit(), "VoiceTest"))
+	voice_status = _label("", 11, DIM)
+	voice_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	voice_status.custom_minimum_size = Vector2(380.0, 0.0)
+	box.add_child(voice_status)
 	# 4 game
 	box.add_child(_label("4  Game", 12, DIM))
 	var game_row := HBoxContainer.new()
@@ -84,6 +95,10 @@ func _ready() -> void:
 	game_row.add_child(game_name)
 	game_row.add_child(_button("▶", func() -> void: _step_game(1), "GameNext"))
 	box.add_child(game_row)
+	game_note = _label("", 11, DIM)
+	game_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	game_note.custom_minimum_size = Vector2(380.0, 0.0)
+	box.add_child(game_note)
 	box.add_child(_button("Done", func() -> void: finished.emit(), "Done"))
 	visible = false
 
@@ -147,6 +162,14 @@ func set_games(list: Array, current_id: String) -> void:
 		if str(games[i].id) == current_id:
 			game_index = i
 	_show_game()
+
+
+func set_voice_status(text: String) -> void:
+	voice_status.text = text
+
+
+func set_game_note(text: String) -> void:
+	game_note.text = text
 
 
 func selected_mic_uid() -> String:
