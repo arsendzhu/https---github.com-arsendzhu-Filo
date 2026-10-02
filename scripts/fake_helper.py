@@ -100,6 +100,10 @@ def reader():
                 send({"event": "apps", "apps": [{"name": "Finder", "bundle_id": "com.apple.finder"}]})
             if cmd.get("cmd") == "listen_open":
                 on_listen_open(cmd)
+            if cmd.get("cmd") == "list_mics":
+                send({"event": "mics", "devices": [{"uid": "BuiltInMic", "name": "MacBook Pro Microphone", "default": True}, {"uid": "USB-1", "name": "USB Headset Microphone", "default": False}]})
+            if cmd.get("cmd") == "mic_test" and cmd.get("on"):
+                threading.Thread(target=lambda: [send({"event": "level", "value": 0.6}) or time.sleep(0.05) for _ in range(6)], daemon=True).start()
             if cmd.get("cmd") == "set_mute":   # like the real helper: acknowledge every mute change
                 send({"event": "mute_state", "muted": bool(cmd.get("muted")), "source": "command"})
     sys.exit(0)

@@ -13,7 +13,7 @@ const DEFAULTS := {
 	"effort": "low",
 	"max_tokens": 700,
 	"refusal_fallbacks": true,
-	"nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b", "max_tokens": 500, "temperature": 0.4, "reasoning": false},
+	"nim": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b", "max_tokens": 220, "temperature": 0.4, "reasoning": false, "keepalive": true, "max_requests_per_minute": 35},
 	"research": {
 		"enabled": true,
 		"models": [
@@ -24,7 +24,9 @@ const DEFAULTS := {
 		"max_rounds": 4,
 		"max_tool_calls": 6,
 		"max_page_chars": 6000,
-		"max_tokens": 350,
+		"max_tokens": 160,          # a 1-2 sentence spoken answer is ~60 tokens; tool calls are shorter still
+		"prefetch": true,           # run the first wiki search + page app-side before the model is asked (see docs)
+		"stream": true,             # server-sent events: time to first token is logged, first sentence can be spoken early
 		"temperature": 0.3,
 		"attempt_timeout": 20.0,
 		"tool_timeout": 10.0,
@@ -60,6 +62,7 @@ const DEFAULTS := {
 	"default_profile": "sekiro",
 	"profiles_dir": "profiles",
 	"hotkey": {"key": "space", "modifiers": ["option"]},
+	"hotkey_panic": {"key": "h", "modifiers": ["control", "option"]},   # hides Filo instantly (and again to bring it back); key "" disables it
 	"hotkey_mute": {"key": "m", "modifiers": ["control", "option"]},   # backup for the mic mute button; key "" disables it
 	"helper": {
 		"enabled": true,
@@ -77,15 +80,22 @@ const DEFAULTS := {
 		"pitch": 1.0,
 		"volume": 70,
 		"kokoro": {"voice": "af_heart", "speed": 1.05, "port": 47823},
+		"stream_first_sentence": true,
+		"normalize_speech": true,           # spoken-style text (see SpeechNormalizer); the bubble text is unchanged
+		"pronunciations": {},               # e.g. {"Cthulhu": "Kuh-thoo-loo", "Smough": "Smoke"}
+		"acknowledgements": ["Let me check that.", "One moment.", "Looking that up.", "Let me see."],
 	},
-	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420},
+	"overlay": {"corner": "bottom_right", "margin": 24, "width": 620, "height": 420, "idle_fps": 10},
 	"mascot": {"internal_resolution": 96, "size": 200, "dither": 0.09, "vertex_jitter": 0.0},
 	"behavior": {
 		"idle_timeout": 0.0,
 		"answer_linger": 0.0,
 		"greet_on_launch": true,
 		"greet_linger": 8.0,
+		"caption_seconds": 8.0,       # with captions on, an answer stays this long after it was spoken, then fades
 		"reprompt": true,
+		"acknowledge": true,          # say "let me check that" when a tool-loop answer takes longer than ack_after_seconds
+		"ack_after_seconds": 1.2,
 		"followup_listen_seconds": 30,
 		"conversation_turns": 4,
 		"reprompt_phrases": ["Anything else?", "Want to know more?", "What else can I help with?", "Need anything else?", "Ask me more if you like."],
@@ -97,7 +107,7 @@ const DEFAULTS := {
 	# question, how long push-to-talk keeps recording after the key is released. `hotwords`: extra recogniser
 	# hints per game ({"game": ["term", ...]}), on top of profiles/vocabulary.json. `term_correction` repairs
 	# mis-heard game terms in the transcript. `keep_mic_warm`: auto = only while the wake word is on.
-	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true},
+	"speech": {"preroll_ms": 450, "hangover_ms": 900, "ptt_tail_ms": 300, "keep_mic_warm": "auto", "hotwords": {}, "term_correction": true, "voice_barge_in": false},
 	# Debug: save every captured utterance (16 kHz WAV, newest 20 kept) so the raw audio can be listened to.
 	"debug": {"save_audio": false, "audio_dir": "logs/audio", "audio_keep": 20},
 	"verbose": false,
@@ -145,6 +155,16 @@ static func load_default(args: Dictionary = {}) -> FiloConfig:
 	var env_nim_model := env_or_dotenv(dotenv, "FILO_NIM_MODEL")
 	if env_nim_model != "":
 		cfg.data["nim"]["model"] = env_nim_model
+	# Endpoint overrides from the environment (used by the test and measurement scripts so nothing can reach a real API).
+	var nim_base_env := OS.get_environment("FILO_NIM_BASE")
+	if nim_base_env != "":
+		cfg.data["nim"]["base_url"] = nim_base_env
+	var api_base_env := OS.get_environment("FILO_API_BASE")
+	if api_base_env != "":
+		cfg.data["api_base_url"] = api_base_env
+	var wiki_base_env := OS.get_environment("FILO_WIKI_BASE")
+	if wiki_base_env != "":
+		cfg.data["web_search"]["wikipedia"]["base_url"] = wiki_base_env
 	cfg.apply_args(args)
 	cfg.normalize_keys()
 	return cfg

@@ -1,0 +1,3 @@
+#!/bin/zsh
+# Setup check: python3 scripts/doctor.py [--offline] [--no-dotenv] ...
+exec python3 "$(cd "$(dirname "$0")" && pwd)/doctor.py" "$@"

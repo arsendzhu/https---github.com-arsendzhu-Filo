@@ -30,7 +30,18 @@ func _init() -> void:
 	await test_unknown_game_still_uses_tools()
 	await _test_routing_paths()
 	await test_followup_uses_session_context()
+	test_settings_persist_roundtrip()
+	await _test_status_and_ack()
+	_test_failure_ux()
+	await _test_spoiler_levels()
+	_test_answer_quality()
+	_test_speech_normalizer()
+	_test_setting_commands()
 	await _test_prefetch()
+	await test_golden_questions_eval()
+	await _test_speaker_continuation()
+	await _test_streaming_and_pacing()
+	await _test_streaming_agent()
 	_test_speech_terms()
 	print("\n%d passed, %d failed" % [passes, failures])
 	quit(1 if failures > 0 else 0)
@@ -826,6 +837,7 @@ func _make_pipeline(script: ScriptedModel, wikis = null, prefetch: bool = false)
 
 
 func _test_router() -> void:
+	check(QueryRouter.rewrite("What is Oongka's role in Crimson Desert", "Crimson Desert").wiki == "Oongka", "a possessive is dropped from the wiki query (Oongka's -> Oongka): " + QueryRouter.rewrite("What is Oongka's role in Crimson Desert", "Crimson Desert").wiki)
 	var games := [{"name": "Terraria", "aliases": ["terraria"]}, {"name": "Dark Souls", "aliases": ["dark souls"]}, {"name": "Dark Souls 3", "aliases": ["dark souls 3", "dark souls iii"]}]
 	for t in ["mute", "Stop.", "hey filo, be quiet", "unmute", "never mind", "repeat that", "Filo stop please"]:
 		check(QueryRouter.classify(t) == "command", "'%s' is a command" % t)
@@ -1173,3 +1185,598 @@ func _test_prefetch() -> void:
 	r = await p.ask(Q)
 	check(r.ok and r.text.contains("could not reach") and s.calls.size() == 1 and s.calls[0].messages[3].content.contains("wiki search failed"), "prefetch: a failed search is passed to the model as an error and the answer is still spoken")
 	p.free()
+
+
+# ------------------------------------------------- streaming, keep-alive plumbing, pacing (workstream 4)
+
+func _sse(events: Array) -> PackedByteArray:
+	var text := ""
+	for e in events:
+		text += "data: " + (e if typeof(e) == TYPE_STRING else JSON.stringify(e)) + "\n\n"
+	return text.to_utf8_buffer()
+
+
+func _test_streaming_and_pacing() -> void:  # coroutine (awaits the limiter)
+	# --- SSE accumulator: content, reasoning dropped, split chunks
+	var deltas := []
+	var acc := SseAccumulator.new(func(d: String) -> void: deltas.append(d))
+	var payload := _sse([
+		{"model": "m1", "choices": [{"delta": {"role": "assistant", "content": ""}}]},
+		{"choices": [{"delta": {"reasoning_content": "SECRET THOUGHT"}}]},
+		{"choices": [{"delta": {"content": "The Lordvessel "}}]},
+		{"choices": [{"delta": {"content": "is in Anor Londo."}, "finish_reason": "stop"}]},
+		"[DONE]",
+	])
+	var cut := payload.size() / 3
+	acc.feed(payload.slice(0, cut))
+	acc.feed(payload.slice(cut, cut * 2 + 1))     # a line is split across chunks
+	acc.feed(payload.slice(cut * 2 + 1))
+	acc.finish()
+	check(acc.text == "The Lordvessel is in Anor Londo." and acc.done and acc.finish_reason == "stop" and acc.model == "m1" and deltas.size() == 2, "SSE: content deltas are joined across split chunks: '%s'" % acc.text)
+	check(not acc.message().content.contains("SECRET") and not acc.message().has("tool_calls") and acc.first_delta_ms >= 0, "SSE: reasoning deltas are dropped, no tool calls")
+	# --- tool-call fragments
+	var acc2 := SseAccumulator.new()
+	acc2.feed(_sse([
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_a", "type": "function", "function": {"name": "wiki_search", "arguments": ""}}]}}]},
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"game\": \"Terr"}}]}}]},
+		{"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "aria\", \"query\": \"Eye\"}"}}, {"index": 1, "id": "call_b", "function": {"name": "web_search", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]},
+		"[DONE]",
+	]))
+	var m := acc2.message()
+	check(acc2.saw_tool_call and m.content == null and m.tool_calls.size() == 2 and m.tool_calls[0].id == "call_a" and m.tool_calls[0].function.name == "wiki_search" and JSON.parse_string(m.tool_calls[0].function.arguments).query == "Eye" and m.tool_calls[1].function.name == "web_search", "SSE: tool-call fragments (id, name, split arguments, two parallel calls) are reassembled")
+	var acc3 := SseAccumulator.new()
+	acc3.feed(_sse([{"error": {"message": "overloaded"}}]))
+	check(acc3.error == "overloaded", "SSE: an error object inside the stream is reported")
+	check(NimClient._parse_body(_sse([{"model": "x", "choices": [{"delta": {"content": "Hi there"}, "finish_reason": "stop"}]}, "[DONE]"]).get_string_from_utf8(), true).choices[0].message.content == "Hi there" and NimClient._parse_body("{\"a\": 1}", true).a == 1, "a streamed body read as text, and a plain error body, both parse")
+
+	# --- first-sentence detection
+	var heard := []
+	var st := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	for piece in ["The Lord", "vessel is in Anor Londo. ", "You get it after killing Ornstein."]:
+		st.feed(piece)
+	check(heard == ["The Lordvessel is in Anor Londo."] and st.emitted, "the first complete sentence is found while text is still arriving: " + str(heard))
+	heard.clear()
+	var st2 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st2.feed("Let me check. ")
+	check(heard.is_empty(), "a short preface ('Let me check.') is not spoken")
+	st2.feed("It has 3.5 times the health of Dr. Smith. Next.")
+	check(heard == ["Let me check. It has 3.5 times the health of Dr. Smith."] or heard.size() == 1, "decimals and abbreviations do not end a sentence: " + str(heard))
+	heard.clear()
+	var st3 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st3.feed("<think>the user asks about the boss. hmm. ")
+	st3.feed("more thinking</think>Dodge the charges and shoot it from behind. Then wait.")
+	check(heard == ["Dodge the charges and shoot it from behind."], "thinking blocks are never spoken: " + str(heard))
+	var st4 := SentenceStreamer.new(func(x: String) -> void: heard.append(x))
+	st4.feed("Read more at https://example.com/page for details on this boss fight. ")
+	check(not heard.back().contains("http"), "URLs are stripped from a spoken sentence")
+	check(SentenceStreamer.split_sentences("One two three. Four five! Six seven eight?  Nine") == PackedStringArray(["One two three.", "Four five!", "Six seven eight?", "Nine"]), "split_sentences")
+
+	# --- request pacing (free tier ~40/min) with a fake clock
+	var t := [0.0]
+	var slept := []
+	var rl := RateLimiter.new(3)
+	rl.clock = func() -> float: return t[0]
+	rl.sleeper = func(sec: float) -> void:
+		slept.append(sec)
+		t[0] += sec
+	await rl.acquire()
+	await rl.acquire()
+	await rl.acquire()
+	check(slept.is_empty() and rl.used == 3 and rl.wait_needed() > 59.0, "pacing: the first 3 requests of a minute go out at once, the 4th has to wait ~60 s")
+	await rl.acquire()
+	check(slept.size() == 1 and slept[0] > 59.0 and slept[0] < 61.0 and rl.used == 4, "pacing: it waits just long enough instead of being answered with a 429: " + str(slept))
+	var rb := RateLimiter.new(100)
+	rb.budget = 2
+	await rb.acquire()
+	await rb.acquire()
+	check(rb.budget_left() == 0 and rb.used == 2, "budget: exactly the allowed number of requests")
+	check(not (await rb.acquire()), "budget: a third request is refused")
+
+	# --- connection URL parsing
+	var b := NimConnection.parse_base("https://integrate.api.nvidia.com/v1")
+	check(b.host == "integrate.api.nvidia.com" and b.port == 443 and b.tls and b.prefix == "/v1", "base URL: https host, port 443, /v1 prefix")
+	b = NimConnection.parse_base("http://127.0.0.1:8787/v1/")
+	check(b.host == "127.0.0.1" and b.port == 8787 and not b.tls and b.prefix == "/v1", "base URL: plain http with a port (the mock server)")
+
+
+func _test_streaming_agent() -> void:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	# the first sentence is handed out while the model is still writing (after tool results)
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, _n: int) -> Dictionary:
+		var full := "Dodge its charges near a platform arena. Then kill the servants in phase two."
+		if opts.get("stream", false) and opts.has("on_text"):
+			for piece in ["Dodge its charges", " near a platform arena", ". Then kill the", " servants in phase two."]:
+				opts.on_text.call(piece)
+		return _reply(full)
+	var p := _make_pipeline(s, null, true)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Eye of Cthulhu"]
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "page"}
+	var heads := []
+	var hints := {"force_tool": true, "wiki_query": "Eye of Cthulhu", "web_query": "Terraria Eye of Cthulhu", "game": "Terraria", "on_sentence": func(x: String) -> void: heads.append(x)}
+	var r: Dictionary = await p.research.answer("Question: " + Q, "Terraria", hints)
+	check(r.ok and heads == ["Dodge its charges near a platform arena."] and s.calls[0].opts.stream == true, "streaming: the first sentence reaches the caller before the answer is complete: " + str(heads))
+	check(r.text.begins_with(heads[0]) and r.text == "Dodge its charges near a platform arena. Then kill the servants in phase two.", "streaming: the final text starts with the spoken head")
+	p.free()
+	# a decision round (no tool results yet, tools allowed) is never streamed to speech
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, n: int) -> Dictionary:
+		if n == 1:
+			if opts.has("on_text"):
+				opts.on_text.call("Let me look that up for you right now. ")
+			return _tool_reply([["web_search", '{"query": "q"}', "t1"]])
+		return _reply("Fire works well against it.")
+	p = _make_pipeline(s, null, false)
+	p.research.tool_overrides["web_search"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "r"}
+	heads.clear()
+	hints = {"force_tool": false, "on_sentence": func(x: String) -> void: heads.append(x)}
+	r = await p.research.answer("Question: x", "G", hints)
+	check(r.ok and heads.is_empty() and not s.calls[0].opts.has("on_text"), "streaming: nothing is spoken from a round in which the model may still call tools")
+	p.free()
+	# a model that rejects stream=true is called normally, and remembered
+	s = ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, opts: Dictionary, _n: int) -> Dictionary:
+		return _fail(400) if opts.get("stream", false) else _reply("Works without streaming.")
+	p = _make_pipeline(s, null, false)
+	r = await p.research.answer("Question: x", "G", {})
+	check(r.ok and r.text == "Works without streaming." and s.calls.size() == 2 and s.calls[0].opts.stream == true and s.calls[1].opts.stream == false, "streaming: a 400 on stream=true is retried without it")
+	r = await p.research.answer("Question: y", "G", {})
+	check(s.calls[2].opts.stream == false, "...and not tried again for that model")
+	p.free()
+
+
+# ---------------------------------------------------- speaking the first sentence while the rest is written (workstream 4)
+
+func _test_speaker_continuation() -> void:
+	# simulated voice (no audio device needed): timing follows the words
+	var sp := Speaker.new()
+	root.add_child(sp)
+	sp.enabled = false          # muted config -> the simulated provider
+	sp._sim_timer = Timer.new()
+	sp._sim_timer.one_shot = true
+	sp.add_child(sp._sim_timer)
+	sp._sim_timer.timeout.connect(sp._sim_step)
+	sp._player = AudioStreamPlayer.new()
+	sp.add_child(sp._player)
+	var events := []
+	sp.started.connect(func(_i: int) -> void: events.append("started"))
+	sp.finished.connect(func(_i: int) -> void: events.append("finished"))
+	sp.cancelled.connect(func(_i: int) -> void: events.append("cancelled"))
+	sp.boundary.connect(func(pos: int, _i: int) -> void: events.append(pos))
+	# head with more to come, tail appended while the head is still being spoken
+	sp.speak("Dodge its charges early.", true)
+	await create_timer(0.15).timeout
+	sp.append("Then fight the servants.")
+	for _i in 60:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	var head_len := "Dodge its charges early.".length()
+	var starts := events.filter(func(e) -> bool: return typeof(e) == TYPE_INT)
+	check(events.count("started") == 1 and events.count("finished") == 1 and events.back() == "finished" and not events.has("cancelled"), "continuation: one started and ONE finished for the head + tail utterance: " + str(events.filter(func(e) -> bool: return typeof(e) != TYPE_INT)))
+	check(starts.size() == 8 and starts[0] == 0 and starts[4] == head_len + 1 and starts[7] == head_len + 1 + "Then fight the ".length(), "continuation: the tail's word positions continue after the head's (%s)" % str(starts))
+	check(not sp.is_speaking(), "continuation: the speaker is idle afterwards")
+	# the tail arrives after the head has finished: the utterance waits for it
+	events.clear()
+	sp.speak("Use fire arrows here.", true)
+	for _i in 40:
+		if sp._head_done:
+			break
+		await create_timer(0.1).timeout
+	check(sp._head_done and sp.is_speaking() and not events.has("finished"), "continuation: a finished head waits for the tail instead of ending the utterance")
+	sp.append("They stagger it.")
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("finished") == 1 and starts.size() > 0, "continuation: a late tail is spoken, then one finished")
+	# no tail after all
+	events.clear()
+	sp.speak("Just this one sentence here.", true)
+	sp.end_stream()
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("finished") == 1, "continuation: end_stream() with no tail finishes after the head")
+	# barge-in cancels everything, including a pending tail
+	events.clear()
+	sp.speak("Long answer being spoken now.", true)
+	await create_timer(0.1).timeout
+	sp.stop()
+	sp.append("This must never be spoken.")
+	await create_timer(0.5).timeout
+	check(events.has("cancelled") and not events.has("finished") and not sp.is_speaking(), "continuation: stop() cancels the utterance and a later append() is ignored")
+	# a plain single utterance is unchanged
+	events.clear()
+	sp.speak("A plain single sentence answer.")
+	for _i in 40:
+		if events.has("finished"):
+			break
+		await create_timer(0.1).timeout
+	check(events.count("started") == 1 and events.count("finished") == 1, "a plain utterance (no continuation) behaves as before")
+	sp.queue_free()
+
+
+# ------------------------------------------------------------------------------- golden questions (Tier 1)
+
+## Every golden question goes through the real AnswerPipeline with a mocked model that answers strictly from the tool
+## result it is given (an extractive stand-in for the LLM): the expected ROUTE must be taken (tool loop / local notes /
+## no tools) and the key terms of the mocked source must appear in the spoken answer.
+func test_golden_questions_eval() -> void:
+	var data = JSON.parse_string(FileAccess.get_file_as_string(FiloConfig.project_root().path_join("tests/golden_questions.json")))
+	check(typeof(data) == TYPE_DICTIONARY and data.questions.size() >= 24, "the golden set loads (%d questions)" % (data.questions.size() if typeof(data) == TYPE_DICTIONARY else 0))
+	var per_game := {}
+	var bench := 0
+	var routes_ok := 0
+	var terms_ok := 0
+	var total := 0
+	for q in data.questions:
+		if q.get("bench", false):
+			bench += 1
+		var g := str(q.game)
+		if g != "":
+			per_game[g] = int(per_game.get(g, 0)) + 1
+		var s := ScriptedModel.new()
+		s.handler = func(_m: String, msgs: Array, _o: Dictionary, _n: int) -> Dictionary:
+			var src := ""
+			for m in msgs:
+				if m.role == "tool" and str(m.content).contains("wiki_page"):
+					var body := str(m.content)
+					src = body.get_slice(">\n", 1).get_slice("\n</tool_result>", 0)
+			var sentences := SentenceStreamer.split_sentences(src)
+			return _reply(" ".join(sentences.slice(0, 3)) if not sentences.is_empty() else "I could not find that.")
+		var p := _make_pipeline(s, null, true)
+		p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+			p.research._last_titles = [str(q.page)]
+			return {"ok": true, "text": "1. " + str(q.page)}
+		p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary:
+			return {"ok": true, "text": str(q.source), "source": {"kind": "web", "title": str(q.page), "url": "https://example.test/wiki/" + str(q.page).uri_encode()}}
+		var r: Dictionary = await p.ask(str(q.question))
+		total += 1
+		var route := str(r.get("route", ""))
+		var want := str(q.route)
+		var route_ok := false
+		match want:
+			"tool":
+				route_ok = route == "tool_loop" and not s.calls.is_empty() and int(r.get("timing", {}).get("tool_calls", 0)) >= 1
+			"local":
+				route_ok = route == "local" and s.calls.is_empty()
+			"smalltalk", "command":
+				route_ok = route == want and s.calls.is_empty()
+		check(route_ok, "[%s] '%s' -> route %s (got %s, %d model calls)" % [q.id, q.question, want, route, s.calls.size()])
+		routes_ok += 1 if route_ok else 0
+		var answer := str(r.get("text", "")).to_lower()
+		var groups_ok := true
+		for group in q.expect:
+			var hit := false
+			for alt in group:
+				if answer.contains(str(alt).to_lower()):
+					hit = true
+			groups_ok = groups_ok and hit
+		check(r.ok and groups_ok, "[%s] the answer contains the key terms %s: '%s'" % [q.id, str(q.expect), answer.left(160)])
+		terms_ok += 1 if (r.ok and groups_ok) else 0
+		check(r.ok and not answer.contains("http") and not answer.contains("*") and not answer.contains("<tool_result"), "[%s] the answer is plain spoken text" % q.id)
+		p.free()
+	for g in ["Terraria", "Sekiro: Shadows Die Twice", "Dark Souls", "Crimson Desert"]:
+		check(int(per_game.get(g, 0)) >= 6, "the golden set has at least 6 questions for %s (%d)" % [g, int(per_game.get(g, 0))])
+	check(bench == 8, "8 questions are marked for the live benchmark (%d)" % bench)
+	print("golden set: %d/%d routed as expected, %d/%d answers contain their key terms" % [routes_ok, total, terms_ok, total])
+
+
+# ------------------------------------------------------------------------- settings (Tier 1)
+
+func test_settings_persist_roundtrip() -> void:
+	var file := ProjectSettings.globalize_path("user://filo_test_settings.json")
+	for suffix in ["", ".corrupt", ".tmp"]:
+		DirAccess.remove_absolute(file + suffix)
+	var s := UserSettings.load_from(file)
+	check(s.values == UserSettings.defaults() and s.last_problems.is_empty(), "a missing settings file gives the defaults without complaint")
+	for k in UserSettings.SCHEMA:
+		check(UserSettings.validate(k, UserSettings.SCHEMA[k].default).ok, "the default of '%s' passes its own validation" % k)
+
+	# round trip: change a value of every type, save, load into a fresh object
+	check(s.set_value("volume", 35) and s.set_value("spoiler_level", "nudge") and s.set_value("mic_muted", true) and s.set_value("voice_muted", true), "valid values are accepted")
+	check(s.set_value("hotkey", {"key": "F8", "modifiers": ["Control", "shift", "bogus"]}) and s.set_value("overlay_offset", [-40, 12.5]) and s.set_value("overlay_opacity", 0.7) and s.set_value("followup_mode", "text") and s.set_value("game", "sekiro") and s.set_value("mic_device", "MacBook Pro Microphone"), "hotkeys, vectors, floats, enums and strings too")
+	check(s.save(), "the file is written")
+	check(FileAccess.file_exists(file) and not FileAccess.file_exists(file + ".tmp"), "the write is atomic: no temporary file is left behind")
+	var t := UserSettings.load_from(file)
+	check(t.values == s.values and t.last_problems.is_empty(), "everything round-trips through the file exactly")
+	check(t.get_value("hotkey") == {"key": "f8", "modifiers": ["control", "shift"]} and t.get_value("volume") == 35 and t.get_value("mic_muted") == true and t.get_value("overlay_offset") == [-40.0, 12.5], "and is normalised (hotkey lower-cased, unknown modifier dropped): " + str(t.get_value("hotkey")))
+
+	# validation
+	check(not s.set_value("volume", "loud") and not s.set_value("spoiler_level", "everything") and not s.set_value("nope", 1) and not s.set_value("mic_muted", "yes") and not s.set_value("overlay_offset", [1]), "wrong types, unknown enum values and unknown keys are refused")
+	check(s.get_value("volume") == 35, "a refused value leaves the old one in place")
+	check(s.set_value("volume", 500) and s.get_value("volume") == 100 and s.set_value("overlay_opacity", 0.0) and is_equal_approx(s.get_value("overlay_opacity"), 0.2), "numbers are clamped to their range")
+
+	# a hand-edited file with a bad value keeps the good ones and reports the bad one
+	var f := FileAccess.open(file, FileAccess.WRITE)
+	f.store_string('{"volume": 20, "spoiler_level": "loud", "mic_muted": "maybe", "future_key": 1, "game": "dark_souls"}')
+	f.close()
+	var u := UserSettings.load_from(file)
+	check(u.get_value("volume") == 20 and u.get_value("game") == "dark_souls" and u.get_value("spoiler_level") == "hint" and u.get_value("mic_muted") == false and u.last_problems.size() == 2, "bad values fall back to their defaults, good ones are kept: " + str(u.last_problems))
+
+	# a corrupt file: defaults, the broken file is kept aside, Filo starts
+	f = FileAccess.open(file, FileAccess.WRITE)
+	f.store_string("{this is not json")
+	f.close()
+	var c := UserSettings.load_from(file)
+	check(c.values == UserSettings.defaults() and c.last_problems == ["corrupt file"], "a corrupt file gives the defaults")
+	check(FileAccess.file_exists(file + ".corrupt") and not FileAccess.file_exists(file), "...and is kept as .corrupt instead of being overwritten or crashing")
+	check(c.save() and UserSettings.load_from(file).values == UserSettings.defaults(), "the next save writes a good file again")
+
+	# settings override config.json
+	var cfg := FiloConfig.new()
+	cfg.data = FiloConfig.DEFAULTS.duplicate(true)
+	s.apply_to(cfg)
+	check(cfg.get_value("tts.volume") == 100 and cfg.get_value("hotkey.key") == "f8" and cfg.get_value("default_profile") == "sekiro" and cfg.get_value("settings.spoiler_level") == "nudge", "settings are applied over the config")
+	for suffix in ["", ".corrupt", ".tmp"]:
+		DirAccess.remove_absolute(file + suffix)
+
+
+# ------------------------------------------------- status feedback + acknowledgement (Tier 1)
+
+func _test_status_and_ack() -> void:
+	# the status shown for every situation
+	var cases := [
+		["ASLEEP", false, false, false, "ready"], ["IDLE", false, false, false, "ready"], ["LISTENING", false, false, false, "listening"],
+		["THINKING", false, false, false, "thinking"], ["ANSWERING", false, false, false, "speaking"], ["TYPING", false, false, false, "typing"],
+		["LISTENING", true, false, false, "muted"], ["ANSWERING", true, false, false, "muted"],
+		["IDLE", false, true, false, "error"], ["THINKING", false, false, true, "heard"], ["ANSWERING", false, false, true, "speaking"],
+		["WAKING", false, false, false, "ready"],
+	]
+	for c in cases:
+		var kind := StatusPill.kind_for(c[0], c[1], c[2], c[3])
+		check(kind == c[4], "status for %s (muted=%s error=%s heard=%s) is '%s' (got '%s')" % [c[0], c[1], c[2], c[3], c[4], kind])
+	var pill := StatusPill.new()
+	pill._ready()
+	pill.set_kind("thinking")
+	check(pill.label() == "Thinking" and pill.mouse_filter == Control.MOUSE_FILTER_STOP and pill.tooltip_text == "Drag to move Filo", "the pill names the state and is the drag grip (it sits inside the clickable bar)")
+	pill.set_kind("bogus")
+	check(pill.kind == "thinking", "an unknown kind is ignored")
+	pill.free()
+	# acknowledgements: never the same phrase twice in a row, stable cache names, only when audible
+	var phrases := ["Let me check that.", "One moment.", "Looking that up."]
+	var last := ""
+	var repeats := 0
+	for i in 40:
+		var pick := Speaker.pick_ack(phrases, last, i * 7 + 3)
+		if pick == last:
+			repeats += 1
+		last = pick
+	check(repeats == 0 and Speaker.pick_ack([], "", 1) == "" and Speaker.pick_ack(["Only."], "Only.", 5) == "Only.", "acknowledgement phrases do not repeat back to back")
+	check(Speaker.ack_cache_name("One moment.", "af_heart", 1.05) == Speaker.ack_cache_name("One moment.", "af_heart", 1.05) and Speaker.ack_cache_name("One moment.", "af_heart", 1.05) != Speaker.ack_cache_name("One moment.", "am_michael", 1.05) and Speaker.ack_cache_name("One moment.", "af_heart", 1.05) != Speaker.ack_cache_name("One moment.", "af_heart", 1.2), "a cached clip is keyed by phrase, voice and speed")
+	var sp := Speaker.new()
+	root.add_child(sp)
+	sp._ack_player = AudioStreamPlayer.new()
+	sp.add_child(sp._ack_player)
+	sp.enabled = true
+	sp.available = false
+	sp.kokoro_ready = false
+	check(not sp.play_ack() and sp.ack_count == 0, "no acknowledgement when no voice is available (simulated speech)")
+	sp.kokoro_ready = true
+	check(not sp.play_ack(), "no acknowledgement while its clip is not ready yet")
+	var wav_rate := 24000
+	var pcm := PackedByteArray()
+	pcm.resize(4800 * 2)
+	var wav := PackedByteArray()
+	wav.resize(44 + pcm.size())
+	_write_ascii(wav, 0, "RIFF")
+	wav.encode_u32(4, 36 + pcm.size())
+	_write_ascii(wav, 8, "WAVE")
+	_write_ascii(wav, 12, "fmt ")
+	wav.encode_u32(16, 16)
+	wav.encode_u16(20, 1)
+	wav.encode_u16(22, 1)
+	wav.encode_u32(24, wav_rate)
+	wav.encode_u32(28, wav_rate * 2)
+	wav.encode_u16(32, 2)
+	wav.encode_u16(34, 16)
+	_write_ascii(wav, 36, "data")
+	wav.encode_u32(40, pcm.size())
+	for phrase in sp.acknowledgements:
+		sp._ack_cache[phrase] = Speaker._parse_wav(wav)
+	check(sp.play_ack() and sp.ack_count == 1 and sp.last_ack != "", "with a cached clip an acknowledgement is played: '%s'" % sp.last_ack)
+	var first := sp.last_ack
+	sp.stop_ack()
+	check(sp.play_ack() and sp.last_ack != first, "...and the next one is different")
+	sp.set_muted(true)
+	sp.stop_ack()
+	check(not sp.play_ack(), "nothing is said while the voice is muted")
+	sp.set_muted(false)
+	sp.play_ack()
+	sp.kokoro_ready = false             # no network in a unit test: the answer below is spoken by the simulated voice
+	sp._player = AudioStreamPlayer.new()
+	sp.add_child(sp._player)
+	sp._sim_timer = Timer.new()
+	sp._sim_timer.one_shot = true
+	sp.add_child(sp._sim_timer)
+	sp.speak("The real answer starts now.")
+	check(not sp._ack_player.playing, "starting the answer cuts an acknowledgement that is still playing")
+	sp.stop()
+	sp.queue_free()
+
+
+# ------------------------------------------------------------------------ failure messages (Tier 1)
+
+func _test_failure_ux() -> void:
+	# the failures that must never be silent, from the raw strings the app really produces
+	var cases := [
+		["", "no_input_device", "no_microphone"], ["", "audio_engine", "no_microphone"],
+		["", "mic_denied", "mic_permission"], ["", "speech_denied", "mic_permission"],
+		["I can't reach Claude — is the internet connected?", "", "no_internet"], ["I can't reach NVIDIA NIM — is the internet connected?", "", "no_internet"],
+		["NVIDIA NIM is having trouble right now. Try again in a bit.", "", "service_down"], ["NVIDIA NIM took too long to answer. Try again.", "", "service_down"],
+		["NVIDIA NIM error 410. The model 'x' has reached its end of life", "", "service_down"],
+		["NVIDIA NIM is rate-limiting us. Give it a moment.", "", "rate_limited"], ["Claude is overloaded", "", "rate_limited"],
+		["NVIDIA NIM rejected the API key. Check NVIDIA_API_KEY in .env.", "", "bad_key"], ["Claude rejected the API key. Check anthropic_api_key in config.json.", "", "bad_key"],
+		["No NVIDIA API key configured.", "", "no_key"],
+		["Error: no wiki API was found for 'X'.", "", "not_found"], ["I couldn't find that in the wiki", "", "not_found"],
+		["", "speech_unavailable", "speech_unavailable"], ["", "recognition", "recognition"], ["", "muted", "muted"],
+		["something nobody planned for", "", "generic"],
+	]
+	for c in cases:
+		var f := FailureUX.classify(c[0], c[1])
+		check(f.kind == c[2], "failure '%s' [%s] is classified as %s (got %s)" % [str(c[0]).left(50), c[1], c[2], f.kind])
+	for kind in FailureUX.KINDS:
+		var k: Dictionary = FailureUX.KINDS[kind]
+		check(str(k.spoken).split(" ", false).size() <= 14 and str(k.spoken) != "" and str(k.visual).length() > str(k.spoken).length() and not str(k.spoken).contains("HTTP") and not str(k.visual).contains("HTTP"), "the '%s' messages are short, spoken-friendly and free of error codes" % kind)
+
+
+# ------------------------------------------------------------------------ spoiler control (Tier 2)
+
+func _test_spoiler_levels() -> void:
+	const Q := "How do I beat the Eye of Cthulhu in Terraria"
+	check(QueryRouter.classify("tell me more") == "command" and QueryRouter.command_for("hey filo, tell me more") == "more" and QueryRouter.command_for("just tell me") == "full" and QueryRouter.command_for("spoil it") == "full", "'tell me more' and 'spoil it' are commands")
+	check(QueryRouter.classify("what about the second phase") == "factual" and QueryRouter.classify("more health potions for the boss fight") == "factual", "ordinary questions that contain those words are not")
+	var s := ScriptedModel.new()
+	s.handler = func(_m: String, _msgs: Array, _o: Dictionary, _n: int) -> Dictionary: return _reply("Use a platform arena.")
+	var p := _make_pipeline(s, null, true)
+	p.research.tool_overrides["wiki_search"] = func(_a: Dictionary) -> Dictionary:
+		p.research._last_titles = ["Eye of Cthulhu"]
+		return {"ok": true, "text": "1. Eye of Cthulhu"}
+	p.research.tool_overrides["wiki_page"] = func(_a: Dictionary) -> Dictionary: return {"ok": true, "text": "page"}
+	check(p.default_level() == "hint", "the default spoiler level is a hint")
+	var r: Dictionary = await p.ask(Q)
+	check(r.level == "hint" and s.calls[0].messages[0].content.contains("Spoiler level: HINT"), "the first answer is a hint (level in the prompt and in the result)")
+	var m: Dictionary = p.more_request()
+	check(m.question == Q and m.level == "nudge", "'tell me more' asks the same question at the next level: " + str(m))
+	r = await p.ask(m.question, Callable(), m.level)
+	check(r.level == "nudge" and s.calls[s.calls.size() - 1].messages[0].content.contains("Spoiler level: NUDGE"), "...as a nudge")
+	m = p.more_request()
+	check(m.level == "full", "...and then the full answer")
+	r = await p.ask(m.question, Callable(), m.level)
+	check(r.level == "full" and s.calls[s.calls.size() - 1].messages[0].content.contains("Spoiler level: FULL"), "the full answer asks for the complete details")
+	m = p.more_request()
+	check(m.question == "" and m.text.contains("full answer"), "there is nothing beyond the full answer: '%s'" % m.text)
+	r = await p.ask("How do I beat Skeletron in Terraria")
+	check(p.more_request(true).level == "full", "'spoil it' jumps straight to the full answer")
+	# the command through ask()
+	r = await p.ask("tell me more")
+	check(r.route == "command" and r.command == "more" and r.question == "How do I beat Skeletron in Terraria" and r.level == "nudge", "asking 'tell me more' returns the previous question at the next level: " + str(r.get("question")))
+	p.cfg.data["settings"] = {"spoiler_level": "full"}
+	check(p.default_level() == "full", "the user's setting decides the starting level")
+	var fresh := _make_pipeline(ScriptedModel.new())
+	r = await fresh.ask("tell me more")
+	check(r.command == "more" and r.question == "" and r.text.contains("nothing to add"), "with no earlier question there is nothing to expand: " + str(r.get("text")))
+	check(Bubble.footer_text([], true, true).contains("tell me more") and not Bubble.footer_text([], true, false).contains("tell me more"), "the bubble offers 'tell me more' after a hint or nudge only")
+	p.free()
+	fresh.free()
+
+
+# ------------------------------------------------------------------------ answer quality (Tier 2)
+
+func _test_answer_quality() -> void:
+	var sections := PackedStringArray(["Overview", "Drops", "Strategy", "Classic mode", "Trivia", "History"])
+	check(WikipediaClient.pick_section("How do I beat the Eye of Cthulhu in Terraria", sections) == "Strategy", "a 'how do I beat' question reads the Strategy section")
+	check(WikipediaClient.pick_section("What does the Wall of Flesh drop", sections) == "Drops", "a drops question reads Drops")
+	check(WikipediaClient.pick_section("where do I find the Guide voodoo doll", PackedStringArray(["Notes", "Spawn", "Strategy"])) == "Spawn", "a 'where' question reads Spawn/Location")
+	check(WikipediaClient.pick_section("who is Kliff", sections) == "" and WikipediaClient.pick_section("beat it", PackedStringArray(["Gallery"])) == "", "no matching heading -> nothing picked")
+	# a long page: 30 lines of overview, then the parts that matter, then trivia
+	var text := "The Eye of Cthulhu is an early boss.\n\n## Overview\n" + "Filler sentence about the boss and its arena. ".repeat(150)
+	text += "\n\n## Drops\n- Lens\n- Black Lens\n\n## Strategy\nFight it on a long flat arena with platforms.\nIn phase two it charges fast, so keep moving and dodge sideways.\nKill its servants first.\n\n## Classic mode\nThe first phase is easier. Keep your distance and use a ranged weapon.\n\n## Trivia\nThe name comes from a story."
+	var titles := WikipediaClient.section_titles(text)
+	var sel := WikipediaClient.select_page_text(text, titles, "", "How do I beat the Eye of Cthulhu?", 3000)
+	check(sel.picked == "Strategy" and sel.text.contains("dodge sideways") and sel.text.contains("Keep your distance") and sel.text.contains("Showing the 'Strategy' part") and sel.text.contains("early boss") and not sel.text.contains("The name comes from") and not sel.text.contains("Filler sentence about the boss and its arena. Filler sentence about the boss and its arena. Filler"), "a long page: the strategy (with its sub-section) and the page's opening lines, not the filler or the trivia")
+	check(sel.text.length() < 2600, "the selection fits the limit (%d chars)" % sel.text.length())
+	var whole := WikipediaClient.select_page_text("Short page.\n\n## Strategy\nDo it.", PackedStringArray(["Strategy"]), "", "how do I beat it", 3000)
+	check(whole.picked == "" and whole.text.contains("Short page.") and whole.text.contains("Sections: Strategy"), "a short page is given whole")
+	check(WikipediaClient.select_page_text(text, titles, "Drops", "how do I beat it", 3000).picked == "Drops", "a section asked for by name always wins")
+	check(WikipediaClient.select_page_text(text, titles, "Nonexistent", "", 3000).error.contains("no section like"), "an unknown section is reported with the list of real ones")
+	check(WikipediaClient.select_page_text(text, titles, "", "", 3000).text.begins_with("Sections:"), "without a question to focus on the page is read from the top, as before")
+	check(WikipediaClient.section_run(text, "Strategy", 5000).contains("Classic mode") and not WikipediaClient.section_run(text, "Strategy", 5000).contains("Trivia"), "a section run continues into sub-sections and stops at Trivia")
+	# preferred sources first
+	var results := [{"url": "https://www.gamesradar.com/x"}, {"url": "https://terraria.wiki.gg/wiki/A"}, {"url": "https://random.example/b"}, {"url": "https://hollowknight.fandom.com/wiki/C"}]
+	var ranked := WebTools.rank_results(results, ["wiki.gg", "fandom.com"])
+	check(ranked.map(func(r: Dictionary) -> String: return r.url.get_slice("/", 2)) == ["terraria.wiki.gg", "hollowknight.fandom.com", "www.gamesradar.com", "random.example"], "wiki hosts are ranked ahead of other sites, each group in its original order")
+	check(WebTools.rank_results(results, []).size() == 4, "no preference leaves the results alone")
+	# the model is told to stay inside the text it was given
+	var a := ResearchAgent.new()
+	var pr := a.system_prompt("Terraria", true)
+	check(pr.contains("wiki doesn't cover that") and pr.contains("section argument") and pr.contains("never answer game facts from memory"), "the research prompt says to admit when the wiki does not cover it and to read by section")
+	a.free()
+
+
+# --------------------------------------------------------------------- spoken-style text (Tier 2)
+
+func _test_speech_normalizer() -> void:
+	var n := func(t: String, p: Dictionary = {}) -> String: return SpeechNormalizer.normalize(t, p)
+	check(n.call("**Dodge** its charges, then use `fire`.") == "Dodge its charges, then use fire.", "markdown emphasis and code marks are dropped")
+	check(n.call("See [the wiki](https://terraria.wiki.gg/wiki/Eye) for more.") == "See the wiki for more.", "links keep their text, never the address")
+	check(n.call("Read more at https://example.com/page now.") == "Read more at now.", "bare URLs are never read out")
+	check(n.call("- Get the key\n- Open the door") == "Get the key Open the door", "list markers and line breaks are flattened")
+	check(n.call("It has 4500 HP and deals 30% more DPS.") == "It has 4500 health points and deals 30 percent more damage per second.", "HP, DPS and % are expanded: " + n.call("It has 4500 HP and deals 30% more DPS."))
+	check(n.call("Do 5-15 damage, +3 defense, x2 speed, 2x drops.") == "Do 5 to 15 damage, plus 3 defense, times 2 speed, 2 times drops.", "ranges, plus, times: " + n.call("Do 5-15 damage, +3 defense, x2 speed, 2x drops."))
+	check(n.call("It costs 1,250 gold.") == "It costs 1250 gold.", "thousands separators are removed")
+	check(n.call("Talk to the mini-boss vs. the NPC, e.g. the guide.") == "Talk to the mini-boss versus the N P C, for example the guide.", "words with hyphens are left alone; vs., NPC, e.g. are expanded: " + n.call("Talk to the mini-boss vs. the NPC, e.g. the guide."))
+	check(n.call("The hp bar") == "The hp bar" and n.call("SHPX") == "SHPX", "acronyms only match as written and as whole words")
+	var pron := {"Cthulhu": "Kuh-thoo-loo", "Smough": "Smoke"}
+	check(n.call("The Eye of Cthulhu and cthulhu's servants beat Smough.", pron) == "The Eye of Kuh-thoo-loo and Kuh-thoo-loo's servants beat Smoke.", "pronunciation overrides apply case-insensitively to whole words: " + n.call("The Eye of Cthulhu and cthulhu's servants beat Smough.", pron))
+	check(n.call("Smoughs are cool", pron) == "Smoughs are cool", "...but not inside longer words")
+	check(n.call(n.call("30% HP x2")) == n.call("30% HP x2"), "normalizing twice changes nothing more")
+	# the bubble keeps the original; the reveal position follows the words when the spoken text is longer
+	check(Speaker.map_spoken_position(5, 14, "same length ok") == 5, "same length: positions are unchanged")
+	var display := "It has 4500 HP left"                                   # 19 chars
+	var spoken := "It has 4500 health points left"                         # 30 chars
+	var at_left := Speaker.map_spoken_position(spoken.find("left"), spoken.length(), display)
+	check(display.substr(at_left).begins_with("left") or display.substr(at_left).begins_with("HP"), "a position inside the expanded text maps back to a word of the displayed text (%d -> '%s')" % [spoken.find("left"), display.substr(at_left)])
+	var sp := Speaker.new()
+	sp.pronunciations = {"Smough": "Smoke"}
+	check(sp.spoken_form("**Smough** has 20 HP.") == "Smoke has 20 health points." and sp.spoken_form("Hi") == "Hi", "Speaker.spoken_form applies the normalizer")
+	sp.normalize_speech = false
+	check(sp.spoken_form("**Smough** has 20 HP.") == "**Smough** has 20 HP.", "...unless turned off")
+	sp.free()
+
+
+# ------------------------------------------------------------- settings commands / accessibility (Tier 2-3)
+
+func _test_setting_commands() -> void:
+	var file := ProjectSettings.globalize_path("user://filo_test_cmd_settings.json")
+	DirAccess.remove_absolute(file)
+	var st := UserSettings.load_from(file)
+	var run := func(line: String) -> Dictionary: return SettingCommands.apply(st, line)
+	check(not run.call("what is the best build").handled and not run.call("/glint").handled and not run.call("").handled, "ordinary text and other slash commands are not settings commands")
+	var r: Dictionary = run.call("/opacity 60")
+	check(r.handled and r.ok and is_equal_approx(st.get_value("overlay_opacity"), 0.6) and r.message.begins_with("Opacity 60"), "/opacity 60 sets 60 %%: %s" % r.message)
+	check(run.call("/opacity 0.7").ok and is_equal_approx(st.get_value("overlay_opacity"), 0.7), "a fraction works too")
+	check(not run.call("/opacity 5").ok and not run.call("/opacity loud").ok and is_equal_approx(st.get_value("overlay_opacity"), 0.7), "out-of-range and non-numeric values are refused and change nothing")
+	r = run.call("/size 120")
+	check(r.ok and r.restart and is_equal_approx(st.get_value("overlay_scale"), 1.2), "/size needs a restart and says so: " + r.message)
+	check(run.call("/corner top_left").ok and st.get_value("overlay_corner") == "top_left" and not run.call("/corner middle").ok, "/corner accepts the four corners only")
+	check(run.call("/captions on").ok and st.get_value("captions") == true and run.call("/captions off").ok and st.get_value("captions") == false and not run.call("/captions maybe").ok, "/captions on|off")
+	check(run.call("/autohide 30").ok and st.get_value("auto_hide_seconds") == 30 and run.call("/autohide off").ok and st.get_value("auto_hide_seconds") == 0 and not run.call("/autohide soon").ok, "/autohide seconds|off")
+	check(run.call("/spoilers full").ok and st.get_value("spoiler_level") == "full" and not run.call("/spoilers everything").ok, "/spoilers hint|nudge|full")
+	check(run.call("/text 150").ok and is_equal_approx(st.get_value("text_scale"), 1.5) and not run.call("/text 500").ok, "/text scales the text up to 200 %")
+	check(run.call("/contrast on").ok and st.get_value("high_contrast") == true, "/contrast on")
+	check(run.call("/volume 40").ok and st.get_value("volume") == 40 and not run.call("/volume").ok, "/volume 0-100")
+	check(run.call("/game dark_souls").ok and st.get_value("game") == "dark_souls" and str(run.call("/game dark_souls").message).contains("detection is off"), "/game <profile> picks the game by hand (detection off)")
+	check(run.call("/game auto").ok and st.get_value("game") == "" and not run.call("/game").ok, "/game auto turns detection back on")
+	check(str(run.call("/settings").message).contains("spoilers full") and str(run.call("/settings").message).contains("contrast on"), "/settings summarises: " + str(run.call("/settings").message))
+	check(UserSettings.load_from(file).values == st.values, "every command was saved to settings.json")
+	DirAccess.remove_absolute(file)
+	# accessibility in the bubble: larger text and a high-contrast palette
+	var b := Bubble.new()
+	b._ready()
+	b.apply_accessibility(1.5, true)
+	check(b.body.get_theme_font_size("font_size") == 23 and b.header.get_theme_font_size("font_size") == 18 and b._style.bg_color == Color.BLACK and b._style.border_color == Color.WHITE and b.max_width > 500.0, "text 150 %% and high contrast change the bubble: body %d px, max width %.0f" % [b.body.get_theme_font_size("font_size"), b.max_width])
+	b.apply_accessibility(1.0, false)
+	check(b.body.get_theme_font_size("font_size") == 15 and b._style.bg_color != Color.BLACK, "and can be turned off again")
+	b.free()
+	# dragging: snap to a corner near it, remember an offset otherwise
+	var scr := Rect2i(0, 60, 3000, 1740)
+	var win := Vector2i(1240, 840)
+	var near := OverlayWindow.snap_position(Vector2i(3000 - 1240 - 48 - 40, 1800 - 840 - 48 - 30), win, scr, 48, 180, 2.0)
+	check(near.snapped and near.corner == "bottom_right" and near.pos == Vector2i(3000 - 1240 - 48, 1800 - 840 - 48) and near.offset == [0.0, 0.0], "dropped near a corner the window snaps to it: " + str(near))
+	var tl := OverlayWindow.snap_position(Vector2i(60, 130), win, scr, 48, 180, 2.0)
+	check(tl.snapped and tl.corner == "top_left" and tl.pos == Vector2i(48, 108), "...any of the four corners")
+	var mid := OverlayWindow.snap_position(Vector2i(900, 500), win, scr, 48, 180, 2.0)
+	check(not mid.snapped and mid.pos == Vector2i(900, 500) and mid.corner in ["top_left", "top_right", "bottom_left", "bottom_right"], "dropped in the middle it stays there and is remembered as an offset from the nearest corner: " + str(mid))
+	var back := OverlayWindow.snap_position(Vector2i(4000, 4000), win, scr, 48, 20, 2.0)
+	check(back.pos.x <= 3000 - 120 and back.pos.y <= 1800 - 120, "a drop far outside the screen is pulled back")
+	var main_script := load("res://main.gd")
+	check(is_equal_approx(main_script.auto_hide_alpha(5.0, 0.0, false), 1.0) and is_equal_approx(main_script.auto_hide_alpha(10.0, 30.0, false), 1.0) and is_equal_approx(main_script.auto_hide_alpha(31.0, 30.0, true), 1.0), "auto-hide: off, not idle long enough, or hovered -> fully visible")
+	check(is_equal_approx(main_script.auto_hide_alpha(30.5, 30.0, false), 0.5) and is_equal_approx(main_script.auto_hide_alpha(35.0, 30.0, false), 0.0), "auto-hide: fades out over a second after the idle time")
+	# window position
+	var usable := Rect2i(0, 0, 3000, 1800)
+	check(OverlayWindow.clamp_to_screen(Vector2i(5000, 5000), Vector2i(1000, 700), usable) == Vector2i(2880, 1680) and OverlayWindow.clamp_to_screen(Vector2i(-5000, -5000), Vector2i(1000, 700), usable) == Vector2i(-880, -580) and OverlayWindow.clamp_to_screen(Vector2i(800, 600), Vector2i(1000, 700), usable) == Vector2i(800, 600), "a saved position that is off the screen is pulled back so the window stays reachable")

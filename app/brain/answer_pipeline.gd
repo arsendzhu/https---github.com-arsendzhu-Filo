@@ -26,6 +26,8 @@ var max_history: int:
 var session_context: Dictionary = {}   # Phase 1+: last_area, last_boss, ...
 var pattern_game_local_confidence := 0.8   # notes must be this sure to answer about a game we only guessed from the wording
 var _req_seq := 0
+const LEVELS := ["hint", "nudge", "full"]
+var current_route := ""                # "" while no question is being routed; "tool_loop" while the research agent works
 
 
 func setup(config: FiloConfig, game_profile: GameProfile) -> void:
@@ -119,14 +121,48 @@ func web_label() -> String:
 ## Routes one question. Every decision is logged as "[req N] route: ..." so a missing lookup is
 ## always explainable from the log: command / small talk (no tools), local notes (confident),
 ## tool loop (research agent) or the plain fallback.
-func ask(question: String) -> Dictionary:
+## `on_sentence`: optional func(sentence: String), called while the tool-loop model is still writing its answer
+## as soon as the first complete sentence exists (so speech can start early). Only the tool-loop route streams.
+## `level`: how much to give away - "hint", "nudge" or "full"; "" = the user's setting (default hint).
+func ask(question: String, on_sentence: Callable = Callable(), level: String = "") -> Dictionary:
+	current_route = ""
+	var lv := level if LEVELS.has(level) else default_level()
+	var result: Dictionary = await _ask_routed(question, on_sentence, lv)
+	current_route = ""
+	return result
+
+
+func default_level() -> String:
+	var l := str(cfg.get_value("settings.spoiler_level", "hint")) if cfg != null else "hint"
+	return l if LEVELS.has(l) else "hint"
+
+
+## "tell me more" / "spoil it": the previous factual question one level up ({} question when there is nothing more).
+func more_request(jump_to_full: bool = false) -> Dictionary:
+	if session.last_question == "":
+		return {"question": "", "level": "", "text": "There's nothing to add yet. Ask me something first."}
+	var cur := LEVELS.find(session.last_level if session.last_level != "" else default_level())
+	var next: int = LEVELS.size() - 1 if jump_to_full else mini(cur + 1, LEVELS.size() - 1)
+	if cur >= LEVELS.size() - 1:
+		return {"question": "", "level": "full", "text": "That was already the full answer."}
+	return {"question": session.last_question, "level": LEVELS[next], "text": ""}
+
+
+func _ask_routed(question: String, on_sentence: Callable, level: String) -> Dictionary:
 	_req_seq += 1
 	var tag := "req %d" % _req_seq
 	var kind := QueryRouter.classify(question)
 	if kind == "command":
 		var cmd := QueryRouter.command_for(question)
 		FiloLog.info("[%s] route: command '%s' - tools skipped" % [tag, cmd])
-		return _command_result(cmd)
+		var cr := _command_result(cmd)
+		if cmd == "more" or cmd == "full":
+			var more := more_request(cmd == "full")
+			cr["question"] = more.question
+			cr["level"] = more.level
+			cr["text"] = more.text
+			cr["spoken"] = more.text
+		return cr
 	if kind == "smalltalk":
 		FiloLog.info("[%s] route: small talk - tools skipped" % tag)
 		return await _smalltalk(question, tag)
@@ -176,13 +212,17 @@ func ask(question: String) -> Dictionary:
 		FiloLog.info("[%s] route: standard fallback - the tool loop is unavailable (%s)" % [tag, _research_unavailable_reason()])
 	else:
 		FiloLog.info("[%s] route: tool loop - %s" % [tag, mismatch if mismatch != "" else "no confident local answer (confidence %.2f < %.2f)" % [confidence, threshold]])
-		var hints := {"force_tool": true, "wiki_query": rw.wiki, "web_query": rw.web, "game": game_name, "tag": tag}
-		var rr: Dictionary = await research.answer(user_content(question, passages, rw, game_name), game_name, hints)
+		current_route = "tool_loop"
+		var hints := {"force_tool": true, "wiki_query": rw.wiki, "web_query": rw.web, "game": game_name, "tag": tag, "on_sentence": on_sentence, "level": level, "question": question}
+		session.last_question = question
+		session.last_level = level
+		var rr: Dictionary = await research.answer(user_content(question, passages, rw, game_name, level), game_name, hints)
 		if rr.ok:
+			FiloLog.info("[%s] done: route=tool_loop model=%s first_token=%dms model=%dms tools=%dms total=%dms rounds=%d tool_calls=%d" % [tag, rr.model, rr.get("ttft_ms", -1), rr.model_ms, rr.tool_ms, rr.total_ms, rr.rounds, rr.tool_calls])
 			_remember(question, rr.text, rw.topic)
 			return {
 				"ok": true, "text": rr.text, "spoken": rr.text, "sources": rr.sources, "used_web": true,
-				"confidence": confidence, "model": rr.model, "provider": "research", "route": "tool_loop", "game": game_name,
+				"confidence": confidence, "model": rr.model, "provider": "research", "route": "tool_loop", "game": game_name, "level": level,
 				"timing": {"total_ms": rr.total_ms, "first_response_ms": rr.first_response_ms, "model_ms": rr.model_ms, "tool_ms": rr.tool_ms, "rounds": rr.rounds, "tool_calls": rr.tool_calls},
 			}
 		FiloLog.warn("[%s] route: tool loop failed (%s) - using the standard fallback" % [tag, str(rr.error)])
@@ -211,8 +251,10 @@ func ask(question: String) -> Dictionary:
 	FiloLog.info("Retrieval: %d note passages, confidence %.2f, web fallback %s" % [passages.size(), confidence, fallback_note])
 	if provider == "none":
 		return _kb_only(passages, confidence)
-	var sys := system_prompt(use_claude_web, wiki_used)
-	var user := user_content(question, passages, rw, game_name)
+	session.last_question = question
+	session.last_level = level
+	var sys := system_prompt(use_claude_web, wiki_used, level)
+	var user := user_content(question, passages, rw, game_name, level)
 	var resp: Dictionary
 	if provider == "nim":
 		resp = await nim.ask(sys, user)
@@ -251,6 +293,7 @@ func ask(question: String) -> Dictionary:
 		"provider": provider,
 		"route": "local" if local_ok else "fallback",
 		"game": game_name,
+		"level": level,
 	}
 
 
@@ -338,10 +381,22 @@ func _kb_only(passages: Array, confidence: float) -> Dictionary:
 		"used_web": is_web,
 		"confidence": confidence,
 		"model": "notes-only",
+		"route": "local",
 	}
 
 
-func system_prompt(use_web: bool, wiki_present: bool = false) -> String:
+## The instruction for how much to give away (shared by the research agent and the plain path).
+static func level_instruction(level: String) -> String:
+	match level:
+		"nudge":
+			return "Spoiler level: NUDGE. For how-to, where-to-find and strategy questions say clearly which approach, item or area to use, in one or two sentences, without a step-by-step walkthrough. Plain factual questions (who or what something is) get a normal short answer."
+		"full":
+			return "Spoiler level: FULL. Give the complete answer with the specific details asked for, in one to three short spoken sentences."
+		_:
+			return "Spoiler level: HINT. For how-to, where-to-find and strategy questions give only a short hint that points the player in the right direction (one sentence) and do not spell out the full solution; the player can ask for more. Plain factual questions (who or what something is) get a normal short answer."
+
+
+func system_prompt(use_web: bool, wiki_present: bool = false, level: String = "") -> String:
 	var game_name := profile.name if profile else "the game"
 	var lines := [
 		"You are Filo, a portable wiki-style gaming companion: a general guide built to help with any game, not just one title. Right now you're helping the player with %s, answering out loud." % game_name,
@@ -353,6 +408,7 @@ func system_prompt(use_web: bool, wiki_present: bool = false) -> String:
 		lines.append("Some passages come from Wikipedia; when the notes are silent, ground the answer in them and say if you're unsure.")
 	if use_web:
 		lines.append("If the notes don't cover the question, use web_search (at most two searches) and base the answer on what you find.")
+	lines.append(level_instruction(level if level != "" else default_level()))
 	lines.append("The player may ask follow-up questions; use the recent conversation to resolve references like 'it', 'that boss' or 'the second phase'.")
 	lines.append("Session context, when present, tells you where the player is right now; use it to disambiguate, don't repeat it back.")
 	if profile and profile.persona_hint != "":
@@ -361,7 +417,7 @@ func system_prompt(use_web: bool, wiki_present: bool = false) -> String:
 	return "\n".join(lines)
 
 
-func user_content(question: String, passages: Array, rewrite: Dictionary = {}, game_name: String = "") -> String:
+func user_content(question: String, passages: Array, rewrite: Dictionary = {}, game_name: String = "", level: String = "") -> String:
 	var game := game_name if game_name != "" else (profile.name if profile else "unknown")
 	var parts := ["Game: " + game]
 	var ctx := session.context()
@@ -373,7 +429,7 @@ func user_content(question: String, passages: Array, rewrite: Dictionary = {}, g
 	if not history.is_empty():
 		var turns := PackedStringArray()
 		for h in history:
-			turns.append("Player: %s\nFilo: %s" % [str(h.q), str(h.a).left(300)])
+			turns.append("Player: %s\nFilo: %s" % [str(h.q), str(h.a).left(200)])
 		parts.append("Recent conversation:\n" + "\n".join(turns))
 	if passages.is_empty():
 		parts.append("Notes: none matched this question.")

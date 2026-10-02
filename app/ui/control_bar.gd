@@ -15,6 +15,8 @@ var mic_button: MicToggle
 var sound_button: SoundToggle
 var mode_button: ModeToggle
 var type_button: TypeButton
+var history_button: HistoryButton
+var status: StatusPill
 var rest_alpha := 0.9
 
 
@@ -40,6 +42,8 @@ func _ready() -> void:
 	row.mouse_filter = MOUSE_FILTER_IGNORE
 	row.add_theme_constant_override("separation", 8)
 	panel.add_child(row)
+	status = StatusPill.new()
+	row.add_child(status)
 	mic_button = MicToggle.new()
 	mic_button.name = "MicButton"
 	sound_button = SoundToggle.new()
@@ -48,7 +52,9 @@ func _ready() -> void:
 	mode_button.name = "ModeButton"
 	type_button = TypeButton.new()
 	type_button.name = "TypeButton"
-	for b in [mic_button, sound_button, mode_button, type_button]:
+	history_button = HistoryButton.new()
+	history_button.name = "HistoryButton"
+	for b in [mic_button, sound_button, mode_button, type_button, history_button]:
 		row.add_child(b)
 	mode_button.visible = true   # the bar shows every control from the first frame
 	modulate.a = rest_alpha
@@ -56,7 +62,7 @@ func _ready() -> void:
 
 
 func buttons() -> Array:
-	return [mic_button, sound_button, mode_button, type_button]
+	return [mic_button, sound_button, mode_button, type_button, history_button]
 
 
 ## The rects (window-local points) that take clicks. Empty while the bar is hidden.

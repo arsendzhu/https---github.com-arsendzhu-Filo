@@ -31,6 +31,8 @@ const COMMANDS := {
 	"mute": ["mute", "mute yourself", "mute voice", "mute the voice", "go silent", "stay silent"],
 	"unmute": ["unmute", "unmute yourself", "unmute voice", "speak again", "you can talk again"],
 	"repeat": ["repeat", "repeat that", "say that again", "say again", "what was that", "come again"],
+	"more": ["tell me more", "more", "more please", "give me more", "go on", "continue", "elaborate", "explain more", "another hint", "next hint", "a bit more", "a little more"],
+	"full": ["spoil it", "just tell me", "tell me everything", "give me the answer", "full answer", "the full answer", "give me the full answer", "spoil it for me"],
 }
 
 const SMALLTALK_PATTERNS := [
@@ -216,6 +218,8 @@ static func rewrite(question: String, game: String, session_topic: String = "") 
 	var wiki := entity if entity != "" else kw
 	if followup and session_topic != "" and entity == "":
 		wiki = (session_topic + " " + kw).strip_edges()
+	wiki = wiki.replace("'s", "").replace("\u2019s", "")       # "Oongka's role" searches the wiki for "Oongka"
+	topic = topic.replace("'s", "").replace("\u2019s", "")
 	var web := ("%s %s" % [game, wiki if wiki != "" else kw]).strip_edges()
 	if wiki == "":
 		wiki = norm

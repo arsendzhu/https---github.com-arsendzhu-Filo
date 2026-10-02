@@ -15,3 +15,6 @@ __pycache__/
 .pytest_cache/
 stt/venv/
 stt/models/
+settings.json
+settings.json.corrupt
+settings.json.tmp

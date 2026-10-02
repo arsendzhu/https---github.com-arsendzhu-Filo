@@ -24,6 +24,9 @@ var tail_y := 40.0
 var tail_anchor_x := 0.0     # x of the tail tip, set by Main every frame
 var bottom_anchor_y := 0.0   # y of the bubble's bottom edge
 var tail_target_y := 0.0     # y the tail points at (the cube's centre)
+var text_scale := 1.0
+var high_contrast := false
+var thinking_label := "Thinking"     # the footer word while waiting (Main changes it to "Looking that up" for a slow answer)
 var _dots_time := 0.0
 var _tween: Tween
 var _style: StyleBoxFlat
@@ -58,6 +61,21 @@ func _ready() -> void:
 	modulate.a = 0.0
 
 
+## Accessibility: larger text and a high-contrast palette (pure white on black, bright accent).
+func apply_accessibility(scale: float, contrast: bool) -> void:
+	text_scale = clampf(scale, 0.8, 2.0)
+	high_contrast = contrast
+	header.add_theme_font_size_override("font_size", roundi(12.0 * text_scale))
+	body.add_theme_font_size_override("font_size", roundi(15.0 * text_scale))
+	footer.add_theme_font_size_override("font_size", roundi(12.0 * text_scale))
+	max_width = 340.0 * text_scale
+	_style.bg_color = Color.BLACK if contrast else Color(INK, 0.94)
+	_style.border_color = Color.WHITE if contrast else CREAM
+	header.add_theme_color_override("font_color", Color("e6e6e6") if contrast else DIM)
+	body.add_theme_color_override("font_color", Color.WHITE if contrast else BODY_COLOR)
+	footer.add_theme_color_override("font_color", Color("ffe14d") if contrast else ACCENT)
+
+
 func _make_label(font_size: int, color: Color) -> Label:
 	var l := Label.new()
 	l.add_theme_font_size_override("font_size", font_size)
@@ -75,7 +93,7 @@ func _process(delta: float) -> void:
 		tail_y = tail_target_y - position.y
 	if mode == Mode.THINKING:
 		_dots_time += delta
-		footer.text = "Thinking" + ".".repeat(int(_dots_time * 3.0) % 4)
+		footer.text = thinking_label + ".".repeat(int(_dots_time * 3.0) % 4)
 	elif mode == Mode.LISTENING:
 		# a persistent, pulsing microphone indicator while the mic is open
 		_dots_time += delta
@@ -117,6 +135,7 @@ func show_followup(prompt: String, bye_phrase: String, hotkey: String) -> void:
 
 
 func show_thinking(question: String) -> void:
+	thinking_label = "Thinking"
 	_set_mode(Mode.THINKING)
 	header.text = "You asked"
 	_set_body(question)
@@ -124,12 +143,36 @@ func show_thinking(question: String) -> void:
 	footer.visible = true
 
 
-func show_answer(question: String, text: String, sources: Array, used_web: bool) -> void:
+const MORE_HINT := "say “tell me more” for more"
+
+
+func show_answer(question: String, text: String, sources: Array, used_web: bool, can_expand: bool = false) -> void:
 	_set_mode(Mode.ANSWER)
 	header.text = "You asked: " + _truncate(question, 90)
 	_set_body(text)
 	body.visible_characters = 0
+	var src := footer_text(sources, used_web, can_expand)
+	footer.text = src
+	footer.visible = src != ""
+
+
+## Sources line, plus the "tell me more" cue when the answer was only a hint or a nudge.
+static func footer_text(sources: Array, used_web: bool, can_expand: bool) -> String:
 	var src := format_sources(sources, used_web)
+	if can_expand:
+		src = (src + "   ·   " + MORE_HINT) if src != "" else "◆ " + MORE_HINT
+	return src
+
+
+## The full answer arrived after only its first sentence was shown (streamed speech): swap the text in place,
+## keeping how much of it has been revealed so far.
+func update_answer(text: String, sources: Array, used_web: bool, can_expand: bool = false) -> void:
+	if mode != Mode.ANSWER:
+		return
+	var keep := body.visible_characters
+	_set_body(text)
+	body.visible_characters = keep
+	var src := footer_text(sources, used_web, can_expand)
 	footer.text = src
 	footer.visible = src != ""
 
@@ -196,8 +239,8 @@ func _set_mode(m: int) -> void:
 	_dots_time = 0.0
 	header.visible = true
 	body.visible = true
-	header.add_theme_color_override("font_color", ERROR_COLOR if m == Mode.ERROR else DIM)
-	_style.border_color = ERROR_COLOR if m == Mode.ERROR else CREAM
+	header.add_theme_color_override("font_color", ERROR_COLOR if m == Mode.ERROR else (Color("e6e6e6") if high_contrast else DIM))
+	_style.border_color = ERROR_COLOR if m == Mode.ERROR else (Color.WHITE if high_contrast else CREAM)
 	body.visible_characters = -1
 	if was_hidden:
 		_appear()

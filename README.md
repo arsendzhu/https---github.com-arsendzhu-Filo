@@ -67,6 +67,23 @@ The hotkey is global (works while a game is focused) and never needs the Accessi
 permission. Change it under `hotkey` in `config.json` (e.g. `{"key": "f8", "modifiers": []}`).
 The overlay is click-through and never takes focus, except while the typed box is open.
 
+## Comfort, control and privacy
+
+- **First run** opens a short setup (microphone picker with a live level meter, hotkey check, voice test, game picker); `/setup` runs it again.
+- **Status** - a dot and one word beside the control bar (Ready, Listening, Heard you, Thinking, Speaking, Typing, Mic muted, Problem) always says whether Filo heard you. A slow answer gets a spoken "let me check that".
+- **Interrupting** - press the talk hotkey (or say the wake phrase with `speech.voice_barge_in`) while Filo talks: it stops at once.
+- **Spoilers** - answers start as a short *hint*; say **"tell me more"** for a nudge and again for the full answer, or **"spoil it"** to jump ahead (`/spoilers hint|nudge|full` sets the starting level).
+- **Follow-ups** - "what about the second phase?" knows the game and the topic (memory resets when the game changes or after 15 minutes idle).
+- **History and captions** - the list button opens the last 10 questions and answers (text only); `/captions on` keeps each answer on screen a few seconds and fades it.
+- **Moving and hiding** - drag the status pill to move Filo (it snaps to the screen corners and remembers where you left it); `/opacity 20-100`, `/size 60-160` (restart), `/corner ...`, `/autohide seconds`. The **panic hotkey `⌃⌥H`** (`hotkey_panic`) hides Filo instantly and mutes the microphone; press it again to bring everything back.
+- **Accessibility** - `/text 80-200` (text size), `/contrast on` (high-contrast bubble), and every button has a typed equivalent (`/mic on|off`, `/voice on|off`, `/followup voice|text`, `/type`, `/history`, `/setup`), so nothing needs the mouse. `/help` lists them all; `/settings` shows the current values.
+- **Failures are never silent**: no microphone, permission denied, service down, rate limited, no internet, wiki not found - each is spoken in one short sentence and shown with what to do.
+- **Doctor** - `python3 scripts/doctor.py` (add `--offline` to skip network checks) prints a PASS/FAIL list for Godot, the helper, microphone, API key (never printed), model list, wikis, voice and settings.
+- **Privacy** - see [docs/privacy.md](docs/privacy.md) for exactly what stays on your machine and what leaves it.
+- **Over games** - Filo floats over borderless-windowed and full-screen-Space games. *Exclusive full-screen* games take over the display and no overlay of any kind can appear on top of them: set the game to borderless windowed.
+
+Your settings live in `settings.json` (validated on load; a corrupt file is set aside as `settings.json.corrupt` and the defaults are used).
+
 ## Research agent (NVIDIA NIM tool calling)
 
 With an `NVIDIA_API_KEY`, questions the notes don't answer confidently go to a small research
@@ -76,6 +93,10 @@ sentences. At most 4 model round trips and 6 tool calls, then a forced final ans
 untrusted data (wrapped, sanitized, size-capped; private/loopback addresses are blocked), and
 reasoning text never reaches the bubble or the voice. If every model in the chain fails, Filo falls
 back to Claude (when a key exists) and then to the plain Wikipedia/notes path.
+
+**Speed.** Four things keep a researched answer fast: (1) *prefetch* (`research.prefetch`): the wiki search and the best page are fetched app-side before the first model call, so one model round trip usually answers instead of three (the model still gets every tool); (2) one persistent HTTPS connection to NIM (`nim.keepalive`) instead of a new TLS handshake per request; (3) streaming (`research.stream`): time to first token is logged for every request and the first complete sentence is spoken while the rest is still being written (`tts.stream_first_sentence`; it stays one utterance, the rest is appended and synthesized in the background); (4) small `max_tokens`, request pacing under the free tier's ~40/min (`nim.max_requests_per_minute`, so bursts wait instead of getting a 429) and a 15-minute tool-result cache. The log shows each request: `[req N] done: route=tool_loop model=... first_token=...ms model=...ms tools=...ms total=...ms`.
+
+**Live benchmark** (the only thing that may call the live API): `NVIDIA_API_KEY=nvapi-... python3 scripts/bench_live.py --label baseline --out logs/bench_baseline.json`, later `--label final --out logs/bench_final.json` (it compares with the baseline; add `--no-prefetch` or `--no-stream` to measure a single change). It runs the 8 fixed questions of `tests/golden_questions.json` (2 per game), uses at most 20 requests and 30 per minute, never reads `.env` (the key must be in the environment) and never prints the key. `--smoke` only checks that the configured models are listed and that `tool_choice=required` is accepted.
 
 **Model chain** — `research.models` in `config.json`, tried in order; a model that returns
 404/410/429/5xx or times out is skipped for `breaker_seconds` (so a dead model costs one timeout).
@@ -131,6 +152,16 @@ Keys go in `.env` (`ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, optional `FILO_PROVIDE
 | `behavior.reprompt_phrases`, `behavior.farewell_phrases` | lists | what Filo says after an answer / on "bye filo" |
 | `wake_word.enabled`, `wake_word.phrase`, `wake_word.bye_phrase`, `wake_word.silence_ms` | true, `hey filo`, `bye filo`, 1500 | always-on wake word, the goodbye phrase, the pause that ends a question |
 | `hotkey.key`, `hotkey.modifiers` | `space`, `["option"]` | push-to-talk key |
+| `research.prefetch`, `research.stream`, `research.max_tokens`, `research.force_first_tool` | true, true, 160, `required` | speed and behaviour of the tool loop (see Research agent) |
+| `nim.keepalive`, `nim.max_requests_per_minute` | true, 35 | persistent NIM connection; client-side pacing under the free tier limit |
+| `tts.stream_first_sentence` | true | speak the first sentence of a streamed answer while the rest is still being written |
+| `tts.normalize_speech`, `tts.pronunciations`, `tts.acknowledgements` | true, `{}`, 4 phrases | spoken-style text (abbreviations, numbers, markdown), per-word pronunciation overrides (`{"Cthulhu": "Kuh-thoo-loo"}`), the "let me check that" clips |
+| `behavior.acknowledge`, `behavior.ack_after_seconds`, `behavior.caption_seconds` | true, 1.2, 8 | spoken acknowledgement for slow tool-loop answers; how long a caption stays |
+| `overlay.idle_fps`, `overlay.offset` | 10, `[0, 0]` | frame rate while asleep (the cube is not rendered); drag offset from the corner (set by dragging) |
+| `hotkey_panic.key`, `hotkey_panic.modifiers` | `h`, `["control", "option"]` | hides Filo instantly (and mutes the mic); key `""` disables |
+| `research.wikis` | Terraria, Minecraft, Stardew, Dark Souls 1-3, Crimson Desert | one line per game: `"hollow knight": "https://hollowknight.wiki.gg"`; games not listed are discovered by web search at question time |
+| `research.preferred_domains` | wiki.gg, fandom.com, minecraft.wiki, wikipedia.org | search results from these hosts are ranked first |
+| `session.idle_reset_seconds` | 900 | the conversation memory (game + last turns) is cleared after this much idle time or when the game changes |
 | `speech.preroll_ms`, `speech.hangover_ms`, `speech.ptt_tail_ms` | 450, 900, 300 | audio kept from before the key press / wake phrase, silence that ends a question, how long push-to-talk keeps recording after the key is released |
 | `speech.keep_mic_warm` | `auto` | keep the microphone engine running so the pre-roll exists (only while the wake word is on, never while Filo talks or the mic is muted); `off` = cold start on every press |
 | `speech.hotwords`, `speech.term_correction` | `{}`, true | extra recogniser hints per game (`{"terraria": ["Skeletron"]}`), on top of `profiles/vocabulary.json`; repair mis-heard game terms in the transcript |

@@ -9,7 +9,10 @@ final class HelperController {
     private var hotKey: HotKey?
     private var speech: SpeechCapture?
     private var wake: WakeListener?
+    private var micTestId: UUID?
+    private var micTestStop: DispatchWorkItem?
     private var muteHotKey: HotKey?
+    private var panicHotKey: HotKey?
     private var micMuted = false
     private var filoSpeaking = false
     private var frontApp: NSRunningApplication?    // the last app that was in front and is not Filo (the game)
@@ -22,6 +25,9 @@ final class HelperController {
         self.options = options
         self.bridge = Bridge(port: options.port)
         self.audio = AudioSource(preRollMs: options.preRollMs)
+        if !options.micDevice.isEmpty, let dev = MicDevices.deviceID(forUID: options.micDevice) {
+            audio.setInputDevice(dev)
+        }
         settings.pttTailMs = options.pttTailMs
         settings.hangoverMs = options.hangoverMs
         settings.debugAudioDir = options.debugAudioDir
@@ -48,6 +54,7 @@ final class HelperController {
             Log.info("connected")
             self.setupHotkey()
             self.setupMuteHotkey()
+            self.setupPanicHotkey()
             self.trackFrontApp()
             if !self.options.noSpeech {
                 let speech = SpeechCapture(localeId: self.options.locale, allowServer: self.options.allowServerSpeech, audio: self.audio, settings: self.settings) { [weak self] in
@@ -87,6 +94,51 @@ final class HelperController {
         } else {
             Log.info("hotkey registered: \(hotkeyLabel())")
         }
+    }
+
+    /// Onboarding: stream the microphone level (no recognition, nothing recorded) for up to 30 s so the player can
+    /// see the meter move while they talk.
+    private func micTest(on: Bool) {
+        micTestStop?.cancel()
+        micTestStop = nil
+        if let id = micTestId {
+            audio.remove(id)
+            micTestId = nil
+        }
+        guard on else { return }
+        guard !micMuted else {
+            bridge.send(["event": "error", "code": "muted", "message": "The microphone is muted, so I can't test it."])
+            return
+        }
+        let id = UUID()
+        var last = Date.distantPast
+        do {
+            try audio.add(id, preRoll: false, { _ in }, dsp: { [weak self] samples, _ in
+                let now = Date()
+                if now.timeIntervalSince(last) > 0.06 {
+                    last = now
+                    self?.bridge.send(["event": "level", "value": AudioSource.level(of: samples)])
+                }
+            })
+            micTestId = id
+            let stop = DispatchWorkItem { [weak self] in self?.micTest(on: false) }
+            micTestStop = stop
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: stop)
+        } catch {
+            bridge.send(["event": "error", "code": "no_input_device", "message": "No microphone input was found (\(error))."])
+        }
+    }
+
+    /// Hides Filo instantly from anywhere (and again to bring it back): the app does the hiding, the helper only
+    /// reports the key, so it works even when the overlay itself cannot be clicked.
+    private func setupPanicHotkey() {
+        guard !options.panicKey.isEmpty, let code = KeyCodes.code(for: options.panicKey) else { return }
+        panicHotKey = HotKey(id: 3, keyCode: code, modifiers: KeyCodes.modifiers(for: options.panicMods)) { [weak self] pressed in
+            guard pressed, let self = self else { return }
+            Log.info("panic hotkey")
+            self.bridge.send(["event": "panic"])
+        }
+        Log.info(panicHotKey == nil ? "could not register the panic hotkey" : "panic hotkey registered: \((options.panicMods + [options.panicKey]).joined(separator: "+"))")
     }
 
     /// The microphone engine may idle "warm" (so the last ~450 ms of audio is always buffered) only while the
@@ -221,6 +273,10 @@ final class HelperController {
             // voice the whole time it talks. wake_resume starts a clean,
             // fresh session right after, which is simple and race-free.
             filoSpeaking = true
+            // Voice barge-in (opt in): keep the wake listener running while Filo talks so "hey filo" can cut it off.
+            // The catch: on laptop speakers the microphone also hears Filo's own voice, which can occasionally
+            // sound like the wake phrase - that is why it is off by default.
+            if options.voiceBargeIn { return }
             audio.setKeepWarm(false)
             audio.clearPreRoll()      // never replay Filo's own voice into the next request
             wake?.stop()
@@ -246,6 +302,22 @@ final class HelperController {
             if let on = dict["enabled"] as? Bool {
                 if on { wake?.start() } else { wake?.stop() }
             }
+        case "list_mics":
+            let devices = MicDevices.list().map { ["uid": $0.uid, "name": $0.name, "default": $0.isDefault] as [String: Any] }
+            bridge.send(["event": "mics", "devices": devices])
+        case "set_mic":
+            let uid = dict["uid"] as? String ?? ""
+            if uid.isEmpty {
+                audio.setInputDevice(nil)
+                Log.info("input device: system default")
+            } else if let id = MicDevices.deviceID(forUID: uid) {
+                audio.setInputDevice(id)
+                Log.info("input device: \(uid)")
+            } else {
+                bridge.send(["event": "error", "code": "no_input_device", "message": "That microphone isn't connected any more."])
+            }
+        case "mic_test":
+            micTest(on: (dict["on"] as? Bool) ?? false)
         case "set_mute":
             if let m = dict["muted"] as? Bool { setMuted(m, source: "command") }
         case "focus_save":

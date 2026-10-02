@@ -48,6 +48,29 @@ var _word_starts: PackedInt32Array = PackedInt32Array()
 var _next_word := 0
 var _speech_duration := 0.0
 var _root := ""
+# Short "let me check that" clips played when an answer is slow (pre-generated at start-up, cached on disk).
+var acknowledgements: Array = ["Let me check that.", "One moment.", "Looking that up.", "Let me see."]
+var pronunciations: Dictionary = {}   # word -> how to say it (tts.pronunciations)
+var normalize_speech := true          # spoken-style text: markdown out, abbreviations/numbers expanded, pronunciations applied
+var _spoken_head := ""                # what the voice is actually given for the head / tail (the display text is unchanged)
+var _spoken_tail := ""
+var last_text := ""                  # the last text handed to speak() (tests, debugging)
+var last_ack := ""
+var ack_count := 0
+var _ack_cache := {}                 # phrase -> parsed wav
+var _ack_player: AudioStreamPlayer
+var _ack_system := false             # the current acknowledgement is being spoken by the system voice (utterance id -1)
+var _rng := RandomNumberGenerator.new()
+# One logical utterance can arrive in two parts: a head (the first sentence, spoken as soon as it exists) and a
+# tail (the rest, appended later). Callers still see ONE started ... finished.
+var _more_expected := false          # the head was started with more to come (append / end_stream)
+var _end_stream_called := false
+var _head_done := false              # the head finished playing; waiting for the tail
+var _tail_text := ""
+var _tail_started := false
+var _tail_ready := false             # kokoro: the tail's audio is synthesized
+var _tail_data := {}                 # parsed wav of the tail
+var _text_offset := 0                # boundary positions of the tail are shifted by the head's length + 1
 
 
 func setup(cfg: FiloConfig) -> void:
@@ -59,6 +82,14 @@ func setup(cfg: FiloConfig) -> void:
 	kokoro_voice = str(cfg.get_value("tts.kokoro.voice", "af_heart"))
 	kokoro_speed = float(cfg.get_value("tts.kokoro.speed", 1.05))
 	kokoro_url = "http://127.0.0.1:%d" % int(cfg.get_value("tts.kokoro.port", 47823))
+	normalize_speech = bool(cfg.get_value("tts.normalize_speech", true))
+	var pron = cfg.get_value("tts.pronunciations", {})
+	if typeof(pron) == TYPE_DICTIONARY:
+		pronunciations = pron
+	var acks = cfg.get_value("tts.acknowledgements", acknowledgements)
+	if typeof(acks) == TYPE_ARRAY:
+		acknowledgements = acks
+	_rng.randomize()
 	_root = FiloConfig.project_root()
 	available = DisplayServer.has_feature(DisplayServer.FEATURE_TEXT_TO_SPEECH)
 	if available and enabled:
@@ -78,6 +109,9 @@ func setup(cfg: FiloConfig) -> void:
 	_player.name = "KokoroPlayer"
 	add_child(_player)
 	_player.finished.connect(_on_player_finished)
+	_ack_player = AudioStreamPlayer.new()
+	_ack_player.name = "AckPlayer"
+	add_child(_ack_player)
 	if enabled and provider in ["auto", "kokoro"]:
 		_start_kokoro()
 
@@ -93,7 +127,7 @@ func _process(_delta: float) -> void:
 	while _next_word < _word_starts.size() and _speech_duration > 0.0:
 		var frac := float(_word_starts[_next_word]) / maxf(_full_text.length(), 1.0)
 		if pos >= frac * _speech_duration:
-			boundary.emit(_word_starts[_next_word], _current_id)
+			boundary.emit(_word_starts[_next_word] + _text_offset, _current_id)
 			_next_word += 1
 		else:
 			break
@@ -120,8 +154,14 @@ func active_provider() -> String:
 	return "simulated"
 
 
-func speak(text: String) -> int:
-	stop()
+## `expect_more`: this is only the first part of the answer; the rest follows with append() (or end_stream()).
+func speak(text: String, expect_more: bool = false) -> int:
+	stop()                            # also cuts an acknowledgement that is still playing
+	_reset_continuation()
+	_full_text = text                  # the head; boundary offsets for an appended tail are counted from its end
+	last_text = text
+	_spoken_head = spoken_form(text)
+	_more_expected = expect_more
 	_current_id = _next_id
 	_next_id += 1
 	var id := _current_id
@@ -129,7 +169,7 @@ func speak(text: String) -> int:
 		"kokoro":
 			_speak_kokoro(text, id)
 		"system":
-			DisplayServer.tts_speak(text, voice_id, volume, pitch, rate, id, true)
+			DisplayServer.tts_speak(_spoken_head, voice_id, volume, pitch, rate, id, true)
 		_:
 			_simulate(text, id)
 	return id
@@ -138,6 +178,7 @@ func speak(text: String) -> int:
 ## Stops the current utterance and reports it as cancelled (a deliberate
 ## interruption — the hotkey pressed mid-answer, a new question, dismissal).
 func stop() -> void:
+	stop_ack()
 	if _current_id == 0:
 		return
 	var id := _cleanup()
@@ -155,9 +196,114 @@ func force_finish() -> void:
 	finished.emit(id)
 
 
+## The rest of the answer, after speak(head, true). It starts as soon as the head has finished playing (a Kokoro
+## tail is synthesized in the meantime, so there is no gap). Only the first call counts.
+func append(text: String) -> void:
+	if _current_id == 0 or _tail_text != "" or _end_stream_called:
+		return
+	_more_expected = false
+	_tail_text = text.strip_edges()
+	if _tail_text == "":
+		end_stream()
+		return
+	_spoken_tail = spoken_form(_tail_text)
+	_text_offset = _full_text.length() + 1
+	if active_provider() == "kokoro":
+		_prepare_kokoro_tail(_tail_text, _current_id)
+	else:
+		_tail_ready = true
+	_try_continue()
+
+
+## No more text is coming after the head: finish once it has been spoken.
+func end_stream() -> void:
+	if _current_id == 0:
+		return
+	_more_expected = false
+	_end_stream_called = true
+	_try_continue()
+
+
+## What the voice is given for `text` (the bubble keeps the original).
+func spoken_form(text: String) -> String:
+	return SpeechNormalizer.normalize(text, pronunciations) if normalize_speech else text
+
+
+## A character position in the spoken text -> the matching word start in the displayed text (the two differ in
+## length when abbreviations were expanded), so the bubble's reveal stays in step with the voice.
+static func map_spoken_position(pos: int, spoken_len: int, display: String) -> int:
+	if spoken_len <= 0 or display.length() == spoken_len:
+		return pos
+	var target := clampi(int(round(float(pos) / float(spoken_len) * float(display.length()))), 0, display.length())
+	var at := display.rfind(" ", target)
+	return 0 if at < 0 else at + 1
+
+
+func _reset_continuation() -> void:
+	_more_expected = false
+	_end_stream_called = false
+	_head_done = false
+	_tail_text = ""
+	_tail_started = false
+	_tail_ready = false
+	_tail_data = {}
+	_text_offset = 0
+
+
+## A part (the head, or the tail) finished playing.
+func _part_finished(id: int) -> void:
+	if id != _current_id:
+		return
+	if not _tail_started and (_more_expected or _tail_text != ""):
+		_head_done = true
+		_try_continue()
+		return
+	_reset_continuation()
+	_current_id = 0
+	_envelope = PackedFloat32Array()
+	finished.emit(id)
+
+
+func _try_continue() -> void:
+	if _current_id == 0 or not _head_done:
+		return                                   # the head is still playing; it calls back when it ends
+	if _tail_text != "" and not _tail_started:
+		if not _tail_ready:
+			return                               # kokoro is still synthesizing the tail; its callback comes back here
+		_tail_started = true
+		_play_tail()
+	elif _tail_text == "" and _end_stream_called:
+		var id := _current_id
+		_reset_continuation()
+		_current_id = 0
+		_envelope = PackedFloat32Array()
+		finished.emit(id)
+
+
+func _play_tail() -> void:
+	var id := _current_id
+	match active_provider():
+		"kokoro":
+			if _tail_data.is_empty():
+				_kokoro_failed(id, "no tail audio")
+				return
+			_full_text = _tail_text
+			_word_starts = _compute_word_starts(_tail_text)
+			_next_word = 0
+			_play_parsed(_tail_data)
+		"system":
+			DisplayServer.tts_speak(_spoken_tail, voice_id, volume, pitch, rate, id, true)
+		_:
+			_sim_text = _tail_text
+			_sim_positions = _compute_word_starts(_tail_text)
+			_sim_index = 0
+			_sim_step()
+
+
 func _cleanup() -> int:
 	var id := _current_id
 	_current_id = 0
+	_reset_continuation()
 	if available and enabled:
 		DisplayServer.tts_stop()
 	_sim_timer.stop()
@@ -228,11 +374,12 @@ func _on_tts_started(id: int) -> void:
 
 func _on_tts_ended(id: int) -> void:
 	if id == _current_id:
-		_current_id = 0
-		finished.emit(id)
+		_part_finished(id)
 
 
 func _on_tts_canceled(id: int) -> void:
+	if id == -1:
+		return                        # an acknowledgement, not an utterance
 	if id == _current_id:
 		_current_id = 0
 	cancelled.emit(id)
@@ -240,7 +387,9 @@ func _on_tts_canceled(id: int) -> void:
 
 func _on_tts_boundary(pos: int, id: int) -> void:
 	if id == _current_id:
-		boundary.emit(pos, id)
+		var spoken := _spoken_tail if _tail_started else _spoken_head
+		var display := _tail_text if _tail_started else _full_text
+		boundary.emit(map_spoken_position(pos, spoken.length(), display) + _text_offset, id)
 
 
 # ------------------------------------------------------------------ kokoro
@@ -281,6 +430,7 @@ func _check_kokoro_health() -> void:
 		kokoro_ready = true
 		_health_timer.stop()
 		FiloLog.info("Kokoro voice ready (%s) — local neural voice in use" % kokoro_voice)
+		_pregenerate_acks()
 
 
 ## One HTTP request for the whole utterance, then one continuous playback.
@@ -294,7 +444,7 @@ func _speak_kokoro(text: String, id: int) -> void:
 	var http := HTTPRequest.new()
 	http.timeout = 45.0
 	add_child(http)
-	var body := JSON.stringify({"text": text, "voice": kokoro_voice, "speed": kokoro_speed})
+	var body := JSON.stringify({"text": _spoken_head, "voice": kokoro_voice, "speed": kokoro_speed})
 	var started_ms := Time.get_ticks_msec()
 	var err := http.request(kokoro_url + "/synthesize", PackedStringArray(["Content-Type: application/json"]), HTTPClient.METHOD_POST, body)
 	if err != OK:
@@ -314,6 +464,10 @@ func _speak_kokoro(text: String, id: int) -> void:
 	if parsed.is_empty():
 		_kokoro_failed(id, "bad wav")
 		return
+	_play_parsed(parsed)
+
+
+func _play_parsed(parsed: Dictionary) -> void:
 	var stream := AudioStreamWAV.new()
 	stream.format = AudioStreamWAV.FORMAT_16_BITS
 	stream.mix_rate = int(parsed.rate)
@@ -326,13 +480,31 @@ func _speak_kokoro(text: String, id: int) -> void:
 	_player.play()
 
 
+## Synthesizes the tail while the head is still playing (one request for the whole tail).
+func _prepare_kokoro_tail(text: String, id: int) -> void:
+	var http := HTTPRequest.new()
+	http.timeout = 45.0
+	add_child(http)
+	var body := JSON.stringify({"text": _spoken_tail, "voice": kokoro_voice, "speed": kokoro_speed})
+	if http.request(kokoro_url + "/synthesize", PackedStringArray(["Content-Type: application/json"]), HTTPClient.METHOD_POST, body) != OK:
+		http.queue_free()
+		_tail_ready = true          # _play_tail reports the failure and falls back to another voice
+		_try_continue()
+		return
+	var res: Array = await http.request_completed
+	http.queue_free()
+	if id != _current_id:
+		return
+	if res[0] == HTTPRequest.RESULT_SUCCESS and res[1] == 200:
+		_tail_data = _parse_wav(res[3])
+	_tail_ready = true
+	_try_continue()
+
+
 func _on_player_finished() -> void:
 	if _current_id == 0:
 		return
-	var id := _current_id
-	_current_id = 0
-	_envelope = PackedFloat32Array()
-	finished.emit(id)
+	_part_finished(_current_id)
 
 
 func _kokoro_failed(id: int, why: String) -> void:
@@ -340,10 +512,17 @@ func _kokoro_failed(id: int, why: String) -> void:
 	kokoro_ready = false
 	if id != _current_id:
 		return
+	var text := _tail_text if _tail_started else _full_text
 	if available and voice_id != "":
-		DisplayServer.tts_speak(_full_text, voice_id, volume, pitch, rate, id, true)
+		DisplayServer.tts_speak(_spoken_tail if _tail_started else _spoken_head, voice_id, volume, pitch, rate, id, true)
 	else:
-		_simulate(_full_text, id)
+		_sim_text = text
+		_sim_positions = _compute_word_starts(text)
+		_sim_index = 0
+		if _tail_started:
+			_sim_step()
+		else:
+			call_deferred("_sim_start", id)
 
 
 ## Character offset of the start of each word (whitespace-split) in `text`.
@@ -437,13 +616,101 @@ func _sim_step() -> void:
 	if _current_id == 0:
 		return
 	if _sim_index >= _sim_positions.size():
-		var id := _current_id
-		_current_id = 0
-		finished.emit(id)
+		_part_finished(_current_id)
 		return
 	var start: int = _sim_positions[_sim_index]
-	boundary.emit(start, _current_id)
+	boundary.emit(start + _text_offset, _current_id)
 	var next_start: int = _sim_positions[_sim_index + 1] if _sim_index + 1 < _sim_positions.size() else _sim_text.length()
 	var word_len := maxi(next_start - start, 1)
 	_sim_index += 1
 	_sim_timer.start(0.09 + 0.045 * word_len)
+
+
+# ---------------------------------------------------------------- acknowledgements
+
+## One of the acknowledgement phrases, never the one used last time (`roll` picks among the others).
+static func pick_ack(phrases: Array, last: String, roll: int) -> String:
+	if phrases.is_empty():
+		return ""
+	var options := phrases.filter(func(p) -> bool: return str(p) != last)
+	if options.is_empty():
+		options = phrases
+	return str(options[posmod(roll, options.size())])
+
+
+## Stable file name for a cached clip: the clip depends on the phrase, the voice and the speed.
+static func ack_cache_name(phrase: String, voice: String, speed: float) -> String:
+	return "ack_%s.wav" % ("%s|%s|%.2f" % [phrase, voice, speed]).md5_text().left(16)
+
+
+## Synthesizes each phrase once (or loads it from user://ack_cache), in the background, so a clip is ready
+## the moment an answer turns out to be slow. Nothing is spoken here.
+func _pregenerate_acks() -> void:
+	var dir := "user://ack_cache"
+	DirAccess.make_dir_recursive_absolute(dir)
+	var made := 0
+	for phrase in acknowledgements:
+		var p := str(phrase)
+		var path := dir.path_join(ack_cache_name(p, kokoro_voice, kokoro_speed))
+		var bytes := PackedByteArray()
+		if FileAccess.file_exists(path):
+			bytes = FileAccess.get_file_as_bytes(path)
+		else:
+			var http := HTTPRequest.new()
+			http.timeout = 30.0
+			add_child(http)
+			var body := JSON.stringify({"text": p, "voice": kokoro_voice, "speed": kokoro_speed})
+			if http.request(kokoro_url + "/synthesize", PackedStringArray(["Content-Type: application/json"]), HTTPClient.METHOD_POST, body) != OK:
+				http.queue_free()
+				continue
+			var res: Array = await http.request_completed
+			http.queue_free()
+			if res[0] == HTTPRequest.RESULT_SUCCESS and res[1] == 200:
+				bytes = res[3]
+				var f := FileAccess.open(path, FileAccess.WRITE)
+				if f != null:
+					f.store_buffer(bytes)
+		var parsed := _parse_wav(bytes) if not bytes.is_empty() else {}
+		if not parsed.is_empty():
+			_ack_cache[p] = parsed
+			made += 1
+	FiloLog.info("Acknowledgement clips ready: %d of %d" % [made, acknowledgements.size()])
+
+
+## "Let me check that." Only while nothing else is being said; returns whether anything audible started.
+func play_ack() -> bool:
+	if acknowledgements.is_empty() or _current_id != 0:
+		return false
+	var phrase := pick_ack(acknowledgements, last_ack, _rng.randi())
+	match active_provider():
+		"kokoro":
+			if not _ack_cache.has(phrase):
+				return false
+			last_ack = phrase
+			ack_count += 1
+			var parsed: Dictionary = _ack_cache[phrase]
+			var stream := AudioStreamWAV.new()
+			stream.format = AudioStreamWAV.FORMAT_16_BITS
+			stream.mix_rate = int(parsed.rate)
+			stream.stereo = false
+			stream.data = parsed.data
+			_ack_player.stream = stream
+			_ack_player.volume_db = linear_to_db(clampf(volume / 100.0, 0.05, 1.0))
+			_ack_player.play()
+			return true
+		"system":
+			last_ack = phrase
+			ack_count += 1
+			_ack_system = true
+			DisplayServer.tts_speak(phrase, voice_id, volume, pitch, rate, -1, false)
+			return true
+	return false
+
+
+func stop_ack() -> void:
+	if _ack_player != null and _ack_player.playing:
+		_ack_player.stop()
+	if _ack_system:
+		_ack_system = false
+		if available and enabled:
+			DisplayServer.tts_stop()

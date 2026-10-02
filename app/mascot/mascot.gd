@@ -132,6 +132,11 @@ func _apply_config(cfg: FiloConfig) -> void:
 	cube_mat.set_shader_parameter("jitter", float(cfg.get_value("mascot.vertex_jitter", 0.0)))
 
 
+## Asleep = invisible: stop rendering the 3D cube and its post-processing altogether (idle GPU/CPU cost).
+func set_rendering(on: bool) -> void:
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if on else SubViewport.UPDATE_DISABLED
+
+
 func set_alpha(a: float) -> void:
 	display.modulate.a = clampf(a, 0.0, 1.0)
 	display.visible = a > 0.001

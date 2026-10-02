@@ -166,7 +166,7 @@ func mw_probe(site: Dictionary) -> Dictionary:
 
 
 ## Cleaned plain text of a page, optionally just one section. {ok, title, url, text, sections, error}
-func mw_page(site: Dictionary, title: String, section: String = "", max_chars: int = 6000) -> Dictionary:
+func mw_page(site: Dictionary, title: String, section: String = "", max_chars: int = 6000, focus: String = "") -> Dictionary:
 	var out := {"ok": false, "title": title, "url": "", "text": "", "sections": PackedStringArray(), "error": ""}
 	var url := "%s?action=parse&page=%s&prop=text&redirects=1&disabletoc=1&format=json&formatversion=2" % [site_api(site), title.replace(" ", "_").uri_encode()]
 	var res: Dictionary = await _get_json(url)
@@ -182,19 +182,109 @@ func mw_page(site: Dictionary, title: String, section: String = "", max_chars: i
 	out.url = page_url(site, out.title)
 	var text := html_to_text(str(parse.get("text", "")))
 	out.sections = section_titles(text)
-	if section.strip_edges() != "":
-		var body := section_of(text, section)
-		if body == "":
-			out.error = "That page has no section like '%s'. Sections: %s" % [section, ", ".join(out.sections)]
-			return out
-		text = body
-	elif out.sections.size() > 0:
-		text = "Sections: %s\n\n%s" % [", ".join(out.sections), text]
-	out.text = truncate_text(text, max_chars)
+	var sel := select_page_text(text, out.sections, section, focus, max_chars)
+	if sel.error != "":
+		out.error = sel.error
+		return out
+	out.text = truncate_text(sel.text, max_chars)
+	out["picked_section"] = sel.picked
 	out.ok = out.text.strip_edges() != ""
 	if not out.ok:
 		out.error = "That page is empty."
 	return out
+
+
+## Which part of a page to give the model: the section it asked for; else, for a long page, the section that best
+## matches what the player wants to know (strategy for "how do I beat", drops for "what does it drop", ...) with the
+## page's opening lines, so the answer is in the text instead of past the character limit. {text, picked, error}
+static func select_page_text(text: String, sections: PackedStringArray, section: String, focus: String, max_chars: int) -> Dictionary:
+	var out := {"text": text, "picked": "", "error": ""}
+	if section.strip_edges() != "":
+		var body := section_of(text, section)
+		if body == "":
+			out.error = "That page has no section like '%s'. Sections: %s" % [section, ", ".join(sections)]
+			return out
+		out.text = body
+		out.picked = section
+		return out
+	if sections.is_empty():
+		return out
+	var header := "Sections: %s\n\n" % ", ".join(sections)
+	if text.length() > max_chars and focus.strip_edges() != "":
+		var pick := pick_section(focus, sections)
+		if pick != "":
+			var run := section_run(text, pick, maxi(1200, max_chars - 900))
+			if run.length() >= 200:
+				out.text = "%s%s\n\n(Showing the '%s' part of this page. Ask for another section by name if this does not answer it.)\n\n%s" % [header, lead_of(text, 700), pick, run]
+				out.picked = pick
+				return out
+	out.text = header + text
+	return out
+
+
+const SECTION_INTENTS := [
+	# [words in the question, headings that answer it (best first)]
+	[["beat", "defeat", "kill", "fight", "strategy", "tactic", "tactics", "boss", "survive", "counter"], ["strategy", "strategies", "tactics", "fighting", "how to beat", "combat", "battle", "guide", "tips"]],
+	[["drop", "drops", "loot", "reward", "rewards", "get from", "spoils"], ["drops", "loot", "rewards", "spoils"]],
+	[["where", "find", "location", "locate", "spawn", "spawns"], ["location", "locations", "where to find", "spawn", "spawning", "obtaining", "how to get", "acquisition"]],
+	[["craft", "recipe", "make", "build", "crafting"], ["crafting", "recipe", "recipes", "creation", "how to craft"]],
+	[["attack", "attacks", "abilities", "moves", "weak", "weakness", "phase", "phases", "behavior", "behaviour"], ["attacks", "abilities", "behavior", "behaviour", "phases", "weakness", "weaknesses", "combat"]],
+	[["unlock", "get", "obtain", "acquire", "buy", "sell", "trade"], ["obtaining", "acquisition", "how to get", "unlock", "unlocking", "purchase", "trading"]],
+	[["quest", "walkthrough", "mission", "complete"], ["walkthrough", "quest", "quests", "guide", "objectives"]],
+]
+const SECTION_STOP := ["trivia", "history", "gallery", "notes", "references", "see also", "achievements", "bugs", "changelog", "version history", "sounds", "music", "lore", "development", "external links", "navigation"]
+
+
+## The heading that best answers what `focus` (the player's question) is after, or "".
+static func pick_section(focus: String, sections: PackedStringArray) -> String:
+	var words := PackedStringArray()
+	for w in focus.to_lower().replace("?", " ").replace(",", " ").replace(".", " ").split(" ", false):
+		words.append(w)
+	for intent in SECTION_INTENTS:
+		var hit := false
+		for w in intent[0]:
+			if words.has(w):
+				hit = true
+				break
+		if not hit:
+			continue
+		for candidate in intent[1]:
+			for sec in sections:
+				var low := sec.to_lower()
+				if low == candidate or low.begins_with(candidate) or low.contains(candidate):
+					return sec
+	return ""
+
+
+## The section called `name` plus the sections after it (a page's sub-headings are all "##" here) until a heading that
+## is clearly something else, or `max_chars`.
+static func section_run(text: String, name: String, max_chars: int) -> String:
+	var want := name.strip_edges().to_lower()
+	var out := PackedStringArray()
+	var started := false
+	var size := 0
+	for line in text.split("\n"):
+		if line.begins_with("## "):
+			var low := line.substr(3).strip_edges().to_lower()
+			if started:
+				var stop := false
+				for st in SECTION_STOP:
+					if low.begins_with(st):
+						stop = true
+				if stop or size > max_chars:
+					break
+			elif low.contains(want):
+				started = true
+		if started:
+			out.append(line)
+			size += line.length() + 1
+	return "\n".join(out).strip_edges()
+
+
+static func lead_of(text: String, max_chars: int) -> String:
+	var idx := text.find("\n## ")
+	var lead := text if idx < 0 else text.substr(0, idx)
+	return truncate_text(lead.strip_edges(), max_chars)
 
 
 ## HTML -> readable plain text: drops scripts, styles, comments, navboxes, references and

@@ -176,6 +176,24 @@ is never used as an answer. Chain order: configured NIM models → Claude → th
 Wikipedia/notes path. The dict returned to `main.gd` is unchanged, so nothing on the Godot/helper
 boundary moved.
 
+## Product layer (workstream 5)
+
+| piece | file | role |
+| --- | --- | --- |
+| router | `app/brain/query_router.gd` | rule-based: command / small talk / factual, which game a question is about, query rewriting for the wiki and the web |
+| session | `app/brain/session_memory.gd` | current game, last turns, last topic and spoiler level; cleared on game change or 15 min idle |
+| spoiler levels | `AnswerPipeline.level_instruction`, `more_request` | hint -> nudge -> full; "tell me more" re-asks at the next level |
+| failures | `app/brain/failure_ux.gd` | raw error / helper code -> one spoken sentence + a visual message |
+| speech text | `app/brain/speech_normalizer.gd` | spoken-style text (markdown out, abbreviations/numbers, pronunciation overrides); the bubble keeps the original |
+| vocabulary | `app/brain/speech_vocabulary.gd`, `term_corrector.gd`, `profiles/vocabulary.json` | recogniser hints per game and repair of mis-heard terms |
+| settings | `app/core/user_settings.gd`, `setting_commands.gd` | validated `settings.json`, the typed `/commands` |
+| controls | `app/ui/control_bar.gd` (+ status pill, history, onboarding panels) | always-visible bar, drag grip, recent questions, first-run setup |
+| doctor | `scripts/doctor.py` | setup check; `scripts/bench_live.py` is the only live benchmark |
+
+The dev/test tooling: `scripts/test.sh` (Godot unit + UI/IPC + offline end-to-end), `scripts/test_audio.sh` (helper compile + segmenter
+self-tests), `pytest` (speech fixtures, benchmark safety, doctor, microphone listing), `scripts/verify.sh` (the overnight gate),
+`scripts/measure_idle.sh` (idle CPU/RSS), `scripts/eval_stt.py` (WER before/after).
+
 ## What is deliberately not here yet
 
 - Screen reading / OCR (Phase 1–2). The glint cue exists; capture does not. `screen_reading.enabled` stays false.

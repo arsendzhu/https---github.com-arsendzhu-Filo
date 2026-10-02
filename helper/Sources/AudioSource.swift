@@ -1,5 +1,7 @@
 import AVFoundation
+import CoreAudio
 import Foundation
+import AudioToolbox
 
 enum AudioSourceError: Error {
     case noInput
@@ -20,6 +22,7 @@ final class AudioSource {
     private var tapInstalled = false
     private(set) var keepWarm = false
     private(set) var suspended = false
+    private var inputDevice: AudioDeviceID?     // nil = the system default input
 
     init(preRollMs: Double) {
         core = AudioTapCore(preRollMs: preRollMs)
@@ -72,6 +75,18 @@ final class AudioSource {
         core.clearPreRoll()
     }
 
+    /// Use this input device from now on (the engine is restarted if it is running). nil = the system default.
+    func setInputDevice(_ device: AudioDeviceID?) {
+        stateLock.lock()
+        inputDevice = device
+        let running = engine.isRunning
+        stateLock.unlock()
+        if running {
+            stopEngine()
+            if keepWarm && !suspended { try? ensureRunning() }
+        }
+    }
+
     private func stopIfIdle() {
         stateLock.lock()
         let warm = keepWarm && !suspended
@@ -84,6 +99,10 @@ final class AudioSource {
         defer { stateLock.unlock() }
         if engine.isRunning { return }
         let input = engine.inputNode
+        if var dev = inputDevice, let unit = input.audioUnit {
+            let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
+            if status != noErr { Log.info("could not select the input device (\(status)); using the default") }
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw AudioSourceError.noInput }
         if !tapInstalled {

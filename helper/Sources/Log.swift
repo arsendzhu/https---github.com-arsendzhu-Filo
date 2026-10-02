@@ -12,9 +12,11 @@ enum Log {
     }()
 
     static func setupFile() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Filo")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("helper.log")
+        var url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Filo/helper.log")
+        if let override = ProcessInfo.processInfo.environment["FILO_HELPER_LOG"], !override.isEmpty {
+            url = URL(fileURLWithPath: override)      // tests write their log next to themselves, not into ~/Library/Logs
+        }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }

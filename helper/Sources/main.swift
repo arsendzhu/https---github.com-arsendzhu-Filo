@@ -17,6 +17,7 @@ struct Options {
     var wakePhrase = ""          // empty = wake word off
     var wakeSilenceMs = 1500
     var testMatcher = false
+    var micDevice = ""           // CoreAudio UID of the chosen input ("" = system default)
     var muteKey = ""             // empty = no mute hotkey
     var muteMods: [String] = []
     var parentPid: Int32 = 0     // Filo's own process, never treated as "the game" when giving focus back
@@ -26,6 +27,9 @@ struct Options {
     var keepWarm = true          // keep the microphone engine running (only while the wake word is on) so the pre-roll exists
     var debugAudioDir = ""       // non-empty: save every captured utterance here (last N kept)
     var debugAudioKeep = 20
+    var panicKey = ""
+    var panicMods: [String] = []
+    var voiceBargeIn = false     // keep listening for the wake phrase while Filo speaks, so "hey filo" can interrupt it
 }
 
 func parseOptions() -> Options {
@@ -51,6 +55,10 @@ func parseOptions() -> Options {
         case "--wake-word": if let v = next() { o.wakePhrase = v }
         case "--wake-silence-ms": if let v = next(), let ms = Int(v) { o.wakeSilenceMs = ms }
         case "--test-matcher": o.testMatcher = true
+        case "--mic-device": if let v = next() { o.micDevice = v }
+        case "--list-mics":
+            for m in MicDevices.list() { print("\(m.isDefault ? "*" : " ") \(m.uid)\t\(m.name)") }
+            exit(0)
         case "--mute-key": if let v = next() { o.muteKey = v }
         case "--mute-mods":
             if let v = next() {
@@ -61,6 +69,12 @@ func parseOptions() -> Options {
         case "--hangover-ms": if let v = next(), let d = Double(v) { o.hangoverMs = max(300, min(3000, d)) }
         case "--ptt-tail-ms": if let v = next(), let d = Double(v) { o.pttTailMs = max(0, min(1500, d)) }
         case "--no-keep-warm": o.keepWarm = false
+        case "--voice-barge-in": o.voiceBargeIn = true
+        case "--panic-key": if let v = next() { o.panicKey = v }
+        case "--panic-mods":
+            if let v = next() {
+                o.panicMods = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
         case "--debug-audio-dir": if let v = next() { o.debugAudioDir = v }
         case "--debug-audio-keep": if let v = next(), let n = Int(v) { o.debugAudioKeep = max(1, n) }
         default: break   // ignore LaunchServices args such as -psn_...

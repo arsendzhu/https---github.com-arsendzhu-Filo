@@ -1,10 +1,5 @@
 #!/bin/zsh
-# Live checks for the research agent (real NVIDIA NIM + real wikis). Skips without NVIDIA_API_KEY.
-#   scripts/research_live.sh                      smoke test
-#   scripts/research_live.sh --bench              latency table on sample questions
-#   scripts/research_live.sh --bench --models nvidia/nemotron-3-super-120b-a12b
-set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-source "$ROOT/scripts/find_godot.sh"
-"$GODOT" --headless --path "$ROOT/app" --import >/dev/null 2>&1 || true
-exec "$GODOT" --headless --path "$ROOT/app" -s tests/research_live.gd -- "$@"
+# Live checks for the research agent. The only live entry point is scripts/bench_live.py (it enforces the
+# request budget and rate limit and never reads .env); this wrapper is kept for muscle memory.
+#   NVIDIA_API_KEY=... scripts/research_live.sh --smoke | --bench ...
+exec python3 "$(cd "$(dirname "$0")" && pwd)/bench_live.py" "$@"

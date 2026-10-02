@@ -46,6 +46,15 @@ func _run() -> void:
 	test_passthrough_covers_controls()
 	await _test_mute_over_ipc()
 	await _test_typing_over_ipc()
+	_test_status_pill_follows_the_app()
+	await test_barge_in_stops_tts()
+	await _test_failures_are_spoken_and_shown()
+	_test_settings_commands_apply_live()
+	_test_drag_and_auto_hide()
+	await _test_history_captions_panic()
+	await _test_onboarding()
+	test_keyboard_only_controls()
+	_test_unconfirmed_mute_is_reported()
 	_test_control_bar_without_main()
 
 	print("\nui tests: %d passed, %d failed" % [passes, failures])
@@ -100,7 +109,7 @@ func test_ui_controls_visible_on_launch() -> void:
 		check(b.size.x >= 16.0 and b.size.y >= 16.0, "%s is big enough to hit (%s)" % [b.name, str(b.size)])
 		check(window_rect.encloses(b.get_global_rect()), "%s lies inside the overlay window (%s in %s)" % [b.name, str(b.get_global_rect()), str(window_rect)])
 		check(b.tooltip_text != "", "%s has a tooltip" % b.name)
-	check(names == ["MicButton", "SoundButton", "ModeButton", "TypeButton"], "the bar has mic mute, voice mute, follow-up mode and type: " + str(names))
+	check(names == ["MicButton", "SoundButton", "ModeButton", "TypeButton", "HistoryButton"], "the bar has mic mute, voice mute, follow-up mode, type and history: " + str(names))
 	check(controls.mode_button.visible, "the follow-up mode button is shown from launch (it used to appear only after the first answer)")
 	check(controls.panel.mouse_filter != Control.MOUSE_FILTER_STOP, "the bar's backing panel does not swallow clicks aimed at the game")
 	check(not main.controls.mic_button.muted, "the microphone starts unmuted")
@@ -207,7 +216,7 @@ func _test_typing_over_ipc() -> void:
 func _test_control_bar_without_main() -> void:
 	var bar := ControlBar.new()
 	root.add_child(bar)
-	check(bar.is_visible_in_tree() and bar.buttons().size() == 4 and bar.interactive_rects().size() == 1, "a control bar on its own is visible with four buttons and one clickable region")
+	check(bar.is_visible_in_tree() and bar.buttons().size() == 5 and bar.interactive_rects().size() == 1, "a control bar on its own is visible with five buttons and one clickable region")
 	bar.mic_button.set_muted(true)
 	check(bar.mic_button.muted and bar.mic_button.tooltip_text.begins_with("Unmute"), "the mic button shows and explains its muted state")
 	var clicks := [0]
@@ -218,3 +227,298 @@ func _test_control_bar_without_main() -> void:
 	bar.type_button._gui_input(ev)
 	check(clicks[0] == 1, "a left-button release on a control emits `pressed`")
 	bar.queue_free()
+
+
+# -------------------------------------------------------------------- status + barge-in
+
+func _test_status_pill_follows_the_app() -> void:
+	main.mic_muted = false
+	main.controls.mic_button.set_muted(false)
+	main._error_until = 0.0
+	main._heard_until = 0.0
+	var seen := {}
+	for st in ["LISTENING", "THINKING", "ANSWERING", "TYPING", "IDLE"]:
+		main.app_state = main.AppState[st]
+		main.controls.status.set_kind(main._status_kind())
+		seen[st] = main.controls.status.label()
+	check(seen == {"LISTENING": "Listening", "THINKING": "Thinking", "ANSWERING": "Speaking", "TYPING": "Typing", "IDLE": "Ready"}, "the control bar's status follows the app state: " + str(seen))
+	main.mic_muted = true
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Mic muted", "muting the microphone shows 'Mic muted'")
+	main.mic_muted = false
+	main._heard_until = Time.get_ticks_msec() / 1000.0 + 5.0
+	main.app_state = main.AppState.THINKING
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Heard you", "right after a transcript arrives the status says it was heard")
+	main._heard_until = 0.0
+	main._show_error("test error")
+	main.speaker.stop()                # the failure message is spoken (see _test_failures_are_spoken_and_shown)
+	main.controls.status.set_kind(main._status_kind())
+	check(main.controls.status.label() == "Problem", "an error shows 'Problem'")
+	main._error_until = 0.0
+	main.app_state = main.AppState.THINKING
+	main.pipeline.current_route = "tool_loop"
+	main._on_ack_timeout()
+	check(main.bubble.thinking_label == "Looking that up", "a slow tool-loop answer changes the wait message to 'Looking that up'")
+	main.pipeline.current_route = ""
+	main.bubble.thinking_label = "Thinking"
+	main._on_ack_timeout()
+	check(main.bubble.thinking_label == "Thinking", "a fast or non-tool route gets no acknowledgement")
+
+
+## Pressing the talk hotkey or saying the wake phrase while Filo talks (or is about to) stops it at once and
+## resets the pipeline: no stale 'finished', no tail spoken later, no late answer overwriting the new turn.
+func test_barge_in_stops_tts() -> void:
+	var sp: Speaker = main.speaker
+	sp.stop()                          # start from silence: earlier tests may have left something speaking
+	var cancelled := [0]
+	var finished := [0]
+	sp.cancelled.connect(func(_i: int) -> void: cancelled[0] += 1)
+	sp.finished.connect(func(_i: int) -> void: finished[0] += 1)
+	var long_text := "This is a long answer that takes quite a while to say out loud, so there is time to interrupt it."
+	# 1) the hotkey while an answer is being spoken
+	main._set_state(main.AppState.ANSWERING)
+	main._speak(long_text, "answer")
+	check(sp.is_speaking(), "barge-in setup: Filo is speaking")
+	var token: int = main._answer_token
+	main._on_hotkey_down()
+	check(not sp.is_speaking(), "the hotkey stops the speech in the same frame")
+	check(cancelled[0] == 1 and main.app_state == main.AppState.LISTENING, "the speech is cancelled once and Filo is listening")
+	check(main._answer_token == token + 1 and main.speech_watchdog.is_stopped() and main._speech_kind == "", "the pipeline is reset: answer superseded, watchdog stopped, speech bookkeeping cleared")
+	await create_timer(0.7).timeout
+	check(finished[0] == 0, "no stale 'finished' arrives after the interruption (it would trigger a reprompt)")
+	# 2) the wake phrase while a streamed head is speaking and its tail is queued
+	main._set_state(main.AppState.ANSWERING)
+	main._speak("Dodge its charges and stay near the platforms.", "answer", true)
+	sp.append("Then kill the servants when the second phase starts.")
+	check(sp.is_speaking() and sp._tail_text != "", "barge-in setup 2: a head is speaking with a tail queued")
+	main._on_wake_word("hey filo")
+	check(not sp.is_speaking() and sp._tail_text == "" and not sp._more_expected, "saying the wake phrase stops the head and drops the queued tail")
+	await create_timer(0.7).timeout
+	check(finished[0] == 0 and cancelled[0] == 2, "the tail is never spoken afterwards (cancelled %d, finished %d)" % [cancelled[0], finished[0]])
+	# 3) while an answer is still on its way (thinking): it must not surface later
+	main._set_state(main.AppState.THINKING)
+	var old_token: int = main._answer_token
+	main._on_hotkey_down()
+	check(main.app_state == main.AppState.LISTENING and main._answer_token == old_token + 1 and main.ack_timer.is_stopped(), "interrupting a pending answer supersedes it and stops the acknowledgement timer")
+	var streamed := {"head": ""}
+	main._on_streamed_head(old_token, "old question", "A late first sentence from the old answer arrives now.", streamed)
+	check(streamed.head == "" and main.app_state == main.AppState.LISTENING and not sp.is_speaking(), "a first sentence from the superseded answer is ignored")
+	# 4) the type button interrupts too
+	main._set_state(main.AppState.ANSWERING)
+	main._speak(long_text, "answer")
+	main._interrupt_speech()
+	check(not sp.is_speaking(), "_interrupt_speech() is safe to call at any time and stops everything")
+	main._interrupt_speech()
+	check(cancelled[0] == 3, "...and calling it again with nothing to stop does nothing")
+
+
+func _test_failures_are_spoken_and_shown() -> void:
+	main._failure_spoken.clear()
+	main.speaker.last_text = ""
+	main._show_error("I can't reach NVIDIA NIM — is the internet connected?")
+	check(main.bubble.mode == Bubble.Mode.ERROR and main.bubble.body.text.contains("internet"), "a failure is shown in the bubble: '%s'" % main.bubble.body.text)
+	check(main.speaker.last_text == "I can't reach the internet right now.", "...and spoken in one short sentence: '%s'" % main.speaker.last_text)
+	main.speaker.last_text = ""
+	await create_timer(0.3).timeout
+	main._show_error("I can't reach Claude — is the internet connected?")
+	check(main.speaker.last_text == "" and main.bubble.mode == Bubble.Mode.ERROR, "the same complaint is not spoken twice in a row (it is still shown)")
+	main._on_helper_error("no_input_device", "No microphone input was found (noInput).")
+	check(main.speaker.last_text.begins_with("I can't find a microphone"), "a helper error (no microphone) is spoken too: '%s'" % main.speaker.last_text)
+	main._on_helper_error("mic_denied", "Microphone access is off.")
+	check(main.speaker.last_text.contains("permission"), "microphone permission denied is spoken: '%s'" % main.speaker.last_text)
+	main.speaker.stop()
+
+
+func _test_settings_commands_apply_live() -> void:
+	main._on_typed_submitted("/opacity 55")
+	check(is_equal_approx(main.modulate.a, 0.55) and main.bubble.body.text.begins_with("Opacity 55"), "typing /opacity 55 dims the overlay at once and confirms in the bubble")
+	main._on_typed_submitted("/text 130")
+	main._on_typed_submitted("/contrast on")
+	check(main.bubble.high_contrast and is_equal_approx(main.bubble.text_scale, 1.3), "/text and /contrast take effect at once")
+	main._on_typed_submitted("/spoilers full")
+	check(main.pipeline.default_level() == "full", "/spoilers changes what the next answer gives away")
+	main._on_typed_submitted("/opacity 100")
+	main._on_typed_submitted("/text 100")
+	main._on_typed_submitted("/contrast off")
+	main._on_typed_submitted("/spoilers hint")
+	check(is_equal_approx(main.modulate.a, 1.0) and not main.bubble.high_contrast, "and back")
+
+
+func _test_drag_and_auto_hide() -> void:
+	var window := main.get_window()
+	var start := window.position
+	main._begin_drag(Vector2i(100, 100))
+	check(main._dragging, "a drag started from the status grip")
+	main._apply_window_mode()
+	check(main._dragging and main.window_state.passthrough == false and main.window_state.unfocusable, "while dragging the window stays clickable (so the release arrives) but never takes focus")
+	main._move_drag(Vector2i(160, 130))
+	check(window.position == start + Vector2i(60, 30), "the window follows the mouse by the same distance: %s -> %s" % [str(start), str(window.position)])
+	main._end_drag()
+	check(not main._dragging and main.settings.get_value("overlay_corner") in ["top_left", "top_right", "bottom_left", "bottom_right"], "releasing ends the drag and saves where Filo is (%s)" % str(main.settings.get_value("overlay_corner")))
+	main._end_drag()
+	check(not main._dragging, "ending a drag twice is harmless")
+	# auto-hide fades the controls after the idle time and any hover brings them back
+	main.settings.set_value("auto_hide_seconds", 5)
+	main.app_state = main.AppState.IDLE
+	main.window_state = {"passthrough": true, "unfocusable": true}
+	main._idle_seconds = 0.0
+	main._update_auto_hide(6.0)
+	check(main.controls.modulate.a < main.controls.rest_alpha * 0.5, "after the idle time the controls fade out (alpha %.2f)" % main.controls.modulate.a)
+	main.window_state = {"passthrough": false, "unfocusable": true}      # the cursor is over the bar
+	main._update_auto_hide(0.016)
+	check(is_equal_approx(main.controls.modulate.a, main.controls.rest_alpha) and main._idle_seconds == 0.0, "hovering the bar brings them straight back")
+	main.settings.set_value("auto_hide_seconds", 0)
+	main._update_auto_hide(100.0)
+	check(is_equal_approx(main.controls.modulate.a, main.controls.rest_alpha), "auto-hide off: always visible")
+
+
+func _test_history_captions_panic() -> void:
+	# history: text only, newest 10, its own button, part of the clickable region while open
+	var hp: HistoryPanel = main.history_panel
+	check(not hp.is_open() and main.controls.history_button.mouse_filter == Control.MOUSE_FILTER_STOP, "the history button exists and the panel starts closed")
+	for i in 13:
+		hp.add_entry("question %d" % i, "answer %d" % i, "Terraria")
+	check(hp.entries.size() == 10 and hp.entries[0].q == "question 3" and hp.entries[9].q == "question 12", "the last 10 exchanges are kept, oldest dropped")
+	check(hp.entries[0].keys() == ["q", "a", "game"], "an entry is text only (question, answer, game) - no sources, links or audio: " + str(hp.entries[0].keys()))
+	main.controls.history_button.pressed.emit()
+	await process_frame
+	await process_frame
+	check(hp.is_open() and main.controls.history_button.active and main.interactive_rects().size() == 2, "clicking the button opens the panel and adds it to the clickable region")
+	check(ClickRegion.covers(main.interactive_rects(), hp.panel.get_global_rect()), "the panel lies inside the clickable region")
+	main._on_typed_submitted("/history")
+	check(not hp.is_open(), "/history toggles it from the keyboard")
+	# captions: the answer stays (and fades on its own) instead of being replaced by the follow-up prompt
+	main.settings.set_value("captions", true)
+	main.bubble.show_answer("q", "A caption that should stay on screen.", [], false)
+	check(main._captions_keep_answer(), "with captions on an answer bubble is kept")
+	main.app_state = main.AppState.LISTENING
+	main.linger_timer.stop()
+	main._on_linger_timeout()
+	check(main.bubble.mode == Bubble.Mode.HIDDEN, "...and the linger timer fades it even while listening for a follow-up")
+	main.settings.set_value("captions", false)
+	main.bubble.show_answer("q", "Normal answer.", [], false)
+	check(not main._captions_keep_answer(), "with captions off it is replaced by the follow-up prompt as before")
+	# panic: hidden, silent, deaf, not clickable, and everything comes back
+	main.app_state = main.AppState.IDLE
+	main.speaker.stop()
+	main.mic_muted = false
+	var before := _count("set_mute", "muted", true)
+	main.speaker.speak("Something being said right now, long enough to interrupt.")
+	main.bridge._handle_line('{"event":"panic"}')          # the helper's panic hotkey event, through the real line parser
+	check(main._panic and not main.speaker.is_speaking() and is_equal_approx(main.modulate.a, 0.0), "the panic hotkey hides Filo and stops the speech at once")
+	check(main.interactive_rects().is_empty() and main.window_state.passthrough == true, "nothing is clickable while hidden")
+	check(main.mic_muted and await _wait_for(func() -> bool: return _count("set_mute", "muted", true) > before), "the microphone is muted (the helper got set_mute) so nothing is heard")
+	check(not main.settings.get_value("mic_muted"), "...without saving that as the user's own mute setting")
+	main._on_hotkey_down()
+	main._on_wake_word("hey filo")
+	check(main.app_state == main.AppState.IDLE or main.app_state == main.AppState.ASLEEP, "hotkey and wake word are ignored while hidden (state %s)" % main.AppState.keys()[main.app_state])
+	main.bridge._handle_line('{"event":"panic"}')
+	check(not main._panic and is_equal_approx(main.modulate.a, float(main.settings.get_value("overlay_opacity"))) and not main.mic_muted, "pressing it again brings Filo back with the microphone as it was")
+	check(main.interactive_rects().size() >= 1, "and the controls are clickable again")
+
+
+func _test_onboarding() -> void:
+	main.settings.set_value("onboarded", false)
+	main.settings.set_value("mic_device", "")
+	var ob: OnboardingPanel = main.onboarding
+	check(not ob.is_open(), "onboarding is closed by default in this run")
+	main._on_typed_submitted("/setup")
+	check(ob.is_open(), "/setup opens the setup panel")
+	check(await _wait_for(func() -> bool: return ob.devices.size() == 2), "the helper answered list_mics: the panel shows its microphones")
+	check(ob.mic_name.text.contains("MacBook Pro Microphone") and ob.mic_name.text.contains("default"), "the default microphone is selected: " + ob.mic_name.text)
+	await process_frame
+	await process_frame
+	check(main.interactive_rects().size() >= 2 and ClickRegion.covers(main.interactive_rects(), ob.panel.get_global_rect()), "the panel is inside the clickable region")
+	check(await _wait_for(func() -> bool: return _count("mic_test", "on", true) > 0), "the level meter was started in the helper (mic_test on)")
+	check(await _wait_for(func() -> bool: return ob.meter.value > 0.0 or ob._level > 0.0), "the helper's level events move the meter")
+	# pick the other microphone
+	var next_btn: Button = ob.panel.find_child("MicNext", true, false)
+	next_btn.pressed.emit()
+	check(ob.mic_name.text.contains("USB Headset") and main.settings.get_value("mic_device") == "USB-1", "choosing another microphone shows it and saves it")
+	check(await _wait_for(func() -> bool: return _count("set_mic", "uid", "USB-1") > 0), "set_mic{uid} reached the helper process")
+	# hotkey check: the key press is captured by the panel, not treated as a question
+	var state_before: int = main.app_state
+	main._on_hotkey_down()
+	check(ob.hotkey_seen and main.app_state == state_before and ob.hotkey_status.text.contains("Got it"), "pressing the hotkey ticks the hotkey step and does not start listening")
+	# voice test
+	main.speaker.last_text = ""
+	var was_enabled: bool = main.speaker.enabled
+	main.speaker.enabled = true                         # this run is --mute; the test needs a voice (simulated here)
+	ob.panel.find_child("VoiceTest", true, false).pressed.emit()
+	check(main.speaker.last_text.contains("Filo"), "the voice test speaks: '%s'" % main.speaker.last_text)
+	check(ob.voice_status.text != "", "...and the panel says what is happening: '%s'" % ob.voice_status.text)
+	main.speaker.stop()
+	main.speaker.enabled = was_enabled
+	# game picker
+	var game_names := ob.games.map(func(g: Dictionary) -> String: return str(g.name))
+	check(ob.games.size() >= 4 and game_names.any(func(n: String) -> bool: return n.contains("Sekiro")) and "Terraria" in game_names and "Dark Souls" in game_names and "Crimson Desert" in game_names, "the picker lists all four starter games, not only the one with notes: " + str(game_names))
+	var before: String = main.profile.id
+	var seen_profiles := []
+	for i in ob.games.size():
+		ob.panel.find_child("GameNext", true, false).pressed.emit()
+		seen_profiles.append(main.profile.name)
+		check(main.settings.get_value("game") == ob.games[ob.game_index].id and main.profile.id == ob.games[ob.game_index].id, "choosing '%s' loads it and saves the choice" % ob.games[ob.game_index].name)
+	check("Terraria" in seen_profiles and seen_profiles.size() == ob.games.size(), "every button press switches the game: " + str(seen_profiles))
+	check(ob.game_note.text.begins_with("Now helping with"), "the panel says which game is active: '%s'" % ob.game_note.text)
+	main._on_onboarding_game("terraria")
+	check(main.profile.name == "Terraria" and main.profile.notes.is_empty() and main.pipeline.session.game == "", "a game without notes works (the wiki answers) and starts a fresh conversation")
+	# the voice test says what it did
+	main.speaker.set_muted(true)
+	ob.panel.find_child("VoiceTest", true, false).pressed.emit()
+	check(ob.voice_status.text.contains("muted"), "with the voice muted the test explains why nothing is heard: '%s'" % ob.voice_status.text)
+	main.speaker.set_muted(false)
+	# dismissing Filo takes the panel with it
+	main.app_state = main.AppState.IDLE
+	main._sleep()
+	check(not ob.is_open(), "dismissing Filo closes the setup panel")
+	main._start_onboarding()
+	check(ob.is_open(), "(reopened for the next step)")
+	# done
+	var off_before := _count("mic_test", "on", false)
+	ob.panel.find_child("Done", true, false).pressed.emit()
+	check(not ob.is_open() and main.settings.get_value("onboarded") == true, "Done closes the panel and remembers that setup was done")
+	check(await _wait_for(func() -> bool: return _count("mic_test", "on", false) > off_before), "the meter was switched off again")
+	main._on_onboarding_game(before)       # leave the profile as it was for the tests after this one
+	ob.close()
+	_start_closed_check(ob)
+
+
+func test_keyboard_only_controls() -> void:
+	# every button of the control bar has a typed equivalent, so nothing needs the mouse
+	main._on_typed_submitted("/mic off")
+	check(main.mic_muted and main.controls.mic_button.muted, "/mic off mutes the microphone like the button")
+	main._on_typed_submitted("/mic on")
+	check(not main.mic_muted, "/mic on unmutes it")
+	main._on_typed_submitted("/voice off")
+	check(main.speaker.user_muted and main.controls.sound_button.muted and main.settings.get_value("voice_muted") == true, "/voice off mutes Filo's voice like the speaker button")
+	main._on_typed_submitted("/voice on")
+	check(not main.speaker.user_muted, "/voice on brings it back")
+	main._on_typed_submitted("/followup text")
+	check(main._followup_mode == "text" and main.controls.mode_button.mode == "text", "/followup text switches follow-ups to typing like the mode button")
+	main._on_typed_submitted("/followup voice")
+	check(main._followup_mode == "voice", "/followup voice switches back")
+	main.app_state = main.AppState.IDLE
+	main._on_typed_submitted("/type")
+	check(main.input_panel.is_open(), "/type opens the question box like the type button")
+	main.input_panel.close()
+
+
+## An old helper build ignores set_mute: the button must not silently pretend the microphone is off.
+func _test_unconfirmed_mute_is_reported() -> void:
+	main._failure_spoken.clear()
+	main.speaker.last_text = ""
+	main.app_state = main.AppState.IDLE
+	main.mic_mute_confirmed = false
+	main._mute_deadline = 0.001                     # the acknowledgement never came
+	main._process(0.016)
+	check(main.bubble.body.text.contains("did not confirm") and main.bubble.body.text.contains("build_helper"), "an unconfirmed mute is shown with what to do: '%s'" % main.bubble.body.text.left(80))
+	check(main.speaker.last_text.contains("isn't confirmed"), "...and spoken: '%s'" % main.speaker.last_text)
+	main.speaker.stop()
+	main._error_until = 0.0
+
+
+func _start_closed_check(ob: OnboardingPanel) -> void:
+	main._start_onboarding()
+	ob.panel.find_child("Close", true, false).pressed.emit()
+	check(not ob.is_open() and main.settings.get_value("onboarded") == true, "the close button also finishes setup and hides the panel")
